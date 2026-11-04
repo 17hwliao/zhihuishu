@@ -1,0 +1,12 @@
+.venv/
+.local/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+config.json
+browser_profile/
+session_data/
+question_bank.json
+course_points.json
+*.log
