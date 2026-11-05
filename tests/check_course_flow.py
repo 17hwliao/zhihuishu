@@ -16,13 +16,15 @@ store = {}
 submits = {'31': 0, '32': 0}
 ai_calls = []
 pages_errors = []
+debug_events = []
 
 BRIDGE = r'''
 globalThis.unsafeWindow = window;
+const gmFetch = fetch.bind(window);
 // These fixture hosts are same-site. window.name keeps the fake GM state across
 // their same-tab navigations without synchronous HTTP calls inside DOM events.
 // This bridge does not simulate multi-tab storage synchronization or isolation.
-const gmState = JSON.parse(window.name || '{}');
+const gmState = JSON.parse(window.name || '{"mastery-ai":{"localLogs":true}}');
 globalThis.GM_getValue = (key, value) => structuredClone(key in gmState ? gmState[key] : value);
 globalThis.GM_setValue = (key, value) => {
     gmState[key] = structuredClone(value);
@@ -30,9 +32,9 @@ globalThis.GM_setValue = (key, value) => {
 };
 globalThis.GM_xmlhttpRequest = options => {
     let aborted = false;
-    fetch('/__ai', {method:'POST', body:options.data}).then(r => r.text()).then(text => {
-        if (!aborted) options.onload({status:200, responseText:text});
-    });
+    const endpoint = options.url.endsWith('/snapshot') ? '/__snapshot' : options.url.startsWith('http://127.0.0.1:8790/') ? '/__debug' : '/__ai';
+    gmFetch(endpoint, {method:'POST', body:options.data}).then(async r => ({status:r.status, responseText:await r.text()}))
+      .then(response => { if (!aborted) options.onload(response); }).catch(() => options.onerror?.());
     return { abort() { aborted = true; options.onabort?.(); } };
 };
 // Shorter UI polling makes this fixture faster while preserving all waits and leases.
@@ -54,7 +56,12 @@ def fixture(route):
     url = urlsplit(req.url)
     query = parse_qs(url.query)
     path = url.path
-    if path == '/__ai':
+    if path == '/__snapshot':
+        return route.fulfill(status=204)
+    if path == '/__debug':
+        debug_events.extend(json.loads(req.post_data)['events'])
+        return route.fulfill(status=204)
+    if path == '/__ai' or (url.hostname == 'api.deepseek.com' and path == '/chat/completions'):
         payload = json.loads(req.post_data)
         data = json.loads(payload['messages'][1]['content'])
         ai_calls.append(data)
@@ -63,6 +70,7 @@ def fixture(route):
     if path.endswith('/list-knowledge-theme'):
         return route.fulfill(json={'data': {'courseThemeList': [{'subThemeList': [{'knowledgeList': [
             {'knowledgeId': '30', 'knowledgeName': '已满分', 'masteryPercentage': 100},
+            {'knowledgeId': '29', 'knowledgeName': '免考不应阻断', 'masteryPercentage': None},
             {'knowledgeId': '31', 'knowledgeName': '一直判错的填空', 'masteryPercentage': 96},
             {'knowledgeId': '32', 'knowledgeName': '连续三次全对', 'masteryPercentage': 90},
         ]}]}]}})
@@ -180,7 +188,13 @@ with sync_playwright() as p:
     assert len(task['results']) == 2
     assert task['results'][0]['high'] == 96 and task['results'][0]['rounds'] == 10
     assert task['results'][1]['high'] == 100 and task['results'][1]['rounds'] == 3
+    assert '一直判错的填空' in page.locator('#zhihuishu-mastery-assistant').locator('.unresolved-results').text_content()
+    assert '10 轮' in page.locator('#zhihuishu-mastery-assistant').locator('.unresolved-results').text_content()
     assert any(call['previouslyIncorrect'] for call in ai_calls)
+    assert any(event['event'] == 'question.captured' for event in debug_events)
+    assert any(event['event'] == 'task.state' for event in debug_events)
+    assert not any(event['event'] in ('runtime.error', 'runtime.rejection', 'scheduler.failed') for event in debug_events)
+    assert 'sk-offline-fixture' not in json.dumps(debug_events)
     assert len(context.pages) == 1, 'Course task should reuse its tab instead of accumulating practice tabs'
     screenshot = Path(__file__).resolve().parents[1] / '.local' / 'mastery-panel-check.png'
     screenshot.parent.mkdir(exist_ok=True)
