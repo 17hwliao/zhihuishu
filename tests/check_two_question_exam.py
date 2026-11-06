@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Verify two-question practice, disabled last-next control and pause/resume during AI."""
 import json
 import time
@@ -6,7 +7,7 @@ from urllib.parse import urlsplit, parse_qs
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = (ROOT / 'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SCRIPT = userscript(ROOT)
 HOST = 'https://ai-smart-course-student-pro.zhihuishu.com'
 EXAM = 'https://studentexamcomh5.zhihuishu.com'
 COURSE, CLS, POINT, PAPER, ATTEMPT = '1000000000000000001', '200001', '31', '801', '17'
@@ -14,7 +15,8 @@ URL = f'{EXAM}/studentReviewTestOrExam/{ATTEMPT}/1/1/{COURSE}/name?point=1&point
 QUESTIONS = [
     {'id': '50001', 'content': '<p>选择跨平台特性</p>', 'questionTypeName': '单选题',
      'optionVos': [{'id': '10', 'content': '<p>无类型</p>'}, {'id': '11', 'content': '<p>跨平台</p>'}]},
-    {'id': '50002', 'content': '<p>填写代码和方法名</p>', 'questionTypeName': '填空题', 'optionVos': []},
+    {'id': '50002', 'content': '<p>填写代码和方法名</p>', 'questionTypeName': '填空题',
+     'optionVos': [{'id': '201', 'content': '空一'}, {'id': '202', 'content': '空二'}]},
 ]
 BRIDGE = r'''
 globalThis.unsafeWindow = window;
@@ -47,12 +49,12 @@ globalThis.GM_xmlhttpRequest = options => {
 '''
 
 EXAM_HTML = r'''<meta charset="utf-8"><div class="questionContent"></div>
-<button class="next-topic next-t">下一题</button><span class="reviewDone">提交作业</span>
+<button class="pre-topic pre-t">上一题</button><button class="next-topic next-t">下一题</button><span class="reviewDone">提交作业</span>
 <script>
-let index=0;
+let index=__START__;window.savedBlanks=[];
 const root=document.querySelector('.questionContent');
 const next=document.querySelector('.next-topic');
-const save=()=>fetch('/gateway/t/v1/answer/saveAnswer',{method:'POST'});
+const save=()=>{if(index)window.savedBlanks=Array.from(root.querySelectorAll('input'),input=>input.value);return fetch('/gateway/t/v1/answer/saveAnswer',{method:'POST'})};
 const owner={
  $route:{params:{examTestId:'17',recruitId:'1000000000000000001'},query:{examPaperId:'801',point:'1',pointId:'31',classId:'200001'}},
  $options:{methods:{saveAnswer(){}}},currentQues:{},reviewTopicData:{},userAnswer:null,
@@ -60,6 +62,7 @@ const owner={
 };
 if(__NATIVE__)root.__vue__={$parent:owner};
 function render(){
+  document.querySelector('.pre-topic').disabled=index===0;
   owner.currentQues={questionId:String(50001+index)};owner.reviewTopicData={id:String(50001+index)};owner.userAnswer=null;
   root.innerHTML='<div class="centent-pre"><pre class="preStyle">'+(index ? '填写代码和方法名':'选择跨平台特性')+'</pre></div>';
   if(index){
@@ -79,12 +82,13 @@ function render(){
   fetch('/gateway/t/v1/question/getExamQuestionInfo?index='+index);
 }
 next.onclick=()=>{index=1;render()};
+document.querySelector('.pre-topic').onclick=()=>{index=0;render()};
 document.querySelector('.reviewDone').onclick=()=>{
   const dialog=document.createElement('div');dialog.className='el-message-box';
   dialog.innerHTML='<p>确认提交作业？</p><button>取消</button><button class="confirm">确认提交</button>';
   dialog.querySelector('.confirm').onclick=async()=>{
     const chosen=root.querySelectorAll('input');
-    await fetch('/__submit',{method:'POST',body:JSON.stringify(Array.from(chosen,input=>input.value))});
+    await fetch('/__submit',{method:'POST',body:JSON.stringify(chosen.length?Array.from(chosen,input=>input.value):window.savedBlanks)});
     location.href='__POINT_URL__';
   };
   document.body.append(dialog);
@@ -94,7 +98,7 @@ render();fetch('/gateway/t/v1/exam/user/getExamSheetInfo');
 
 with sync_playwright() as p:
     browser = p.chromium.launch(channel='msedge', headless=True)
-    for pause_case, changed_case, native_case, relay_case in ((False, False, False, False), (True, False, False, False), (False, True, False, False), (False, False, True, False), (False, False, True, True)):
+    for pause_case, changed_case, native_case, relay_case, backward_case in ((False, False, False, False, False), (True, False, False, False, False), (False, True, False, False, False), (False, False, True, False, False), (False, False, True, True, False), (False, False, True, False, True)):
         submits, saves, calls, errors = [], [], [], []
         context = browser.new_context()
         seed = {'mastery-ai': {'key': 'fixture-key', 'model': 'fixture-model', 'limit': 1, 'localLogs': False},
@@ -131,12 +135,16 @@ with sync_playwright() as p:
                 return route.fulfill(json={'data': {'aiExamQuestionInfo': [
                     {'id': '50001', 'userAnswerDtos': [{'isCorrect': 1}], 'optionDtos': [{'content': '<p>跨平台</p>', 'isCorrect': 1}]},
                     {'id': '50002', 'userAnswerDtos': [{'isCorrect': 1}], 'result': 'int x=2;#@#main'}]}})
+            if path.endswith('/get-node-master-max'):
+                return route.fulfill(json={'code': 200, 'data': {'masteryMax': 100}})
             if path.endswith('/questions-paper'):
                 return route.fulfill(json={'data': {'questionNum': 2, 'highMasteryScore': 100}})
             if path.startswith('/studentReviewTestOrExam/'):
-                body = EXAM_HTML.replace('__NATIVE__', str(native_case).lower())
+                body = EXAM_HTML.replace('__NATIVE__', str(native_case).lower()).replace('__START__','1' if backward_case else '0')
             elif path.startswith('/examPreview/'):
                 body = '<script>fetch("/stu/exam/questions-paper-result-page")</script>'
+            elif path.startswith('/masteryHistory/'):
+                body = '<script>fetch("/mastery-statistics/get-node-master-max")</script>'
             elif path.startswith('/learnPage/'):
                 body = '<span class="simplified-mastery__percent">100%</span><script>fetch("/stu/exam/questions-paper")</script>'
             else:
@@ -184,10 +192,12 @@ with sync_playwright() as p:
                 break
         assert not state['active'] and not state['paused'], state
         assert submits == [['int x=2;', 'main']], submits
-        assert len(saves) == (2 if native_case else 3), saves
+        # A reload after pause renders the saved first answer empty in this fixture;
+        # restoring it must obtain one new save receipt without another model request.
+        assert len(saves) == (2 if native_case else 4 if pause_case else 3), saves
         assert len([call for call in calls if not call['blanks']]) == 1
         assert state['results'][0]['high'] == 100
         assert not errors, errors
-        print(f'Two-question exam pause={pause_case}, native_save={native_case}, relay={relay_case}: exact choice, two blanks, save receipts, disabled last-next, one confirmed submission, official result and mastery verification passed.')
+        print(f'Two-question exam pause={pause_case}, native_save={native_case}, relay={relay_case}, start_at_last={backward_case}: exact choice, two blanks, save receipts, disabled last-next, one confirmed submission, official result and mastery verification passed.')
         context.close()
     browser.close()

@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Check course-entry auto start and the restricted local channel in a simulated browser."""
 import importlib.util
 import json
@@ -36,7 +37,7 @@ with tempfile.TemporaryDirectory() as tmp, sync_playwright() as p:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f'http://127.0.0.1:{server.server_port}'
-    source = (ROOT / 'zhihuishu-mastery.user.js').read_text(encoding='utf-8').replace('http://127.0.0.1:8790', base)
+    source = userscript(ROOT).replace('http://127.0.0.1:8790', base)
 
     def controller(command=None):
         request = Request(base + ('/control/clients' if command is None else '/control/commands'),
@@ -58,10 +59,14 @@ with tempfile.TemporaryDirectory() as tmp, sync_playwright() as p:
                 {'knowledgeId': '31', 'knowledgeName': '点一', 'masteryPercentage': 96},
                 {'knowledgeId': '32', 'knowledgeName': '点二', 'masteryPercentage': 95},
                 {'knowledgeId': '33', 'knowledgeName': '免考', 'masteryPercentage': None}]}]}]}})
+        if path.endswith('/get-node-master-max'):
+            return route.fulfill(json={'code': 200, 'data': {'masteryMax': 100}})
         if path.endswith('/questions-paper'):
             return route.fulfill(json={'data': {'questionNum': 1, 'highMasteryScore': 100}})
         if path.startswith('/singleCourse/'):
             html = '<h1>课程目录</h1><script>fetch("/stu/list-knowledge-theme")</script>'
+        elif path.startswith('/masteryHistory/'):
+            html = '<script>fetch("/mastery-statistics/get-node-master-max")</script>'
         elif path.startswith('/learnPage/'):
             html = '<h1>官方已达标</h1><span class="simplified-mastery__percent">100%</span><script>fetch("/stu/exam/questions-paper")</script>'
         else:
@@ -95,7 +100,7 @@ with tempfile.TemporaryDirectory() as tmp, sync_playwright() as p:
                         break
                 assert clients, 'No browser handshake'
                 client = clients[-1]
-                assert client['keyConfigured'] and client['version'] == '2.4.1'
+                assert client['keyConfigured'] and client['version'] == '2.5.2'
                 assert 'private-fixture-key' not in json.dumps(client)
                 controller({'documentId': client['documentId'], 'course': COURSE, 'cls': CLS, 'action': 'start', 'stopAfter': 1})
                 page.wait_for_function("JSON.parse(window.name)['mastery-task']?.id !== 'old-paused' && JSON.parse(window.name)['mastery-task']?.paused")

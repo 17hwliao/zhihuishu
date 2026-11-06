@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Replay knowledge cards from a user-exported DOM snapshot without account/API access."""
 import argparse
 import html
@@ -14,7 +15,7 @@ parser.add_argument('--expect-pending', type=int)
 parser.add_argument('--expect-total', type=int)
 args = parser.parse_args()
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = (ROOT / 'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SCRIPT = userscript(ROOT)
 report = json.loads(args.report.read_text(encoding='utf-8-sig'))
 snapshot = report['snapshot']
 nodes = snapshot['elements']
@@ -124,7 +125,7 @@ with sync_playwright() as p:
         assert state['mastery-task-history'][-1]['course'] == old_course
         assert task['catalogSource'] == ('api+dom' if mode == 'broken-api' else 'dom')
         assert f'/{task["queue"][0]["point"]}/' in page.url
-        entries = [entry for key, value in state.items() if key.startswith('mastery-debug:') for entry in value]
+        entries = [entry for key, value in state.items() if key.startswith('mastery-panel-log-v2:') for entry in value]
         assert any(entry['event'] == 'navigation.card-click' for entry in entries)
         if mode == 'fallback':
             assert any(entry['event'] == 'navigation.card-fallback' for entry in entries)

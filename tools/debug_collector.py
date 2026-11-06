@@ -1,4 +1,5 @@
-"""Loopback-only, append-only receiver for the userscript's redacted debug events."""
+"""Loopback-only receiver with bounded operational logs and structural diagnostics."""
+import hashlib
 import argparse
 import json
 import os
@@ -15,6 +16,19 @@ from urllib.parse import urlsplit, parse_qsl, urlencode, urlunsplit
 
 SENSITIVE = re.compile(r'token|cookie|password|secret|authorization|credential|api.?key|ticket|session', re.I)
 QUERY_FIELDS = {'point', 'pointId', 'classId', 'courseId', 'paperId', 'examPaperId', 'catalogActiveTab'}
+EVENT_FIELDS = {'version', 'build', 'kind', 'task', 'id', 'phase', 'point', 'round', 'rounds', 'source', 'question',
+                'fingerprint', 'verdict', 'reason', 'attempt', 'attempts', 'count', 'confirmed', 'total', 'status',
+                'ok', 'result', 'model', 'transport', 'method', 'mode', 'active', 'paused', 'course', 'cls',
+                'index', 'limit', 'duplicate', 'conflicts', 'elements', 'dropped', 'actions', 'page'}
+
+
+def operational_event(event):
+    clean = {k: sanitize(v) for k, v in event.items() if k in
+             ('time', 'seq', 'event', 'level', 'documentId', 'page', 'version', 'receivedAt', 'task', 'point', 'round')}
+    clean['data'] = {k: sanitize(v)[:160] if isinstance(v, str) else v
+                     for k, v in (event.get('data') or {}).items()
+                     if k in EVENT_FIELDS and type(v) in (str, int, float, bool)}
+    return clean
 
 
 def clean_url(value):
@@ -52,18 +66,77 @@ def sanitize(value, depth=0):
 class Collector(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, output, port):
+    def __init__(self, output, port, *, log_bytes=1048576, log_files=4,
+                 snapshot_bytes=2097152, snapshot_total_bytes=8388608, snapshot_count=6):
+        if log_bytes < 512 or log_files < 2 or min(snapshot_bytes, snapshot_total_bytes, snapshot_count) <= 0:
+            raise ValueError('invalid retention limits')
         self.output = Path(output).resolve()
         self.output.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.seen = OrderedDict()
         self.count = 0
+        self.log_bytes, self.log_files = log_bytes, log_files
+        self.snapshot_bytes, self.snapshot_total_bytes, self.snapshot_count = snapshot_bytes, snapshot_total_bytes, snapshot_count
+        self.pruned_bytes = 0
         self.clients = {}
         self.commands = {}
         self.control_secret = secrets.token_urlsafe(32)
         self.control_file = self.output.parent / 'debug-control.json'
         super().__init__(('127.0.0.1', port), Handler)
         self.control_file.write_text(json.dumps({'port': self.server_port, 'secret': self.control_secret}), encoding='utf-8')
+        if self.output.exists() and self.output.stat().st_size > self.log_bytes:
+            self.rotate_logs()
+        self.prune_logs()
+        self.prune_snapshots()
+
+    def rotate_logs(self):
+        # Only this receiver's exact archive names are managed; no recursive file operations.
+        last = self.output.with_name(self.output.name + f'.{self.log_files - 1}')
+        if last.exists():
+            self.pruned_bytes += last.stat().st_size
+            last.unlink()
+        for index in range(self.log_files - 2, 0, -1):
+            source = self.output.with_name(self.output.name + f'.{index}')
+            if source.exists():
+                source.replace(self.output.with_name(self.output.name + f'.{index + 1}'))
+        if self.output.exists():
+            self.output.replace(self.output.with_name(self.output.name + '.1'))
+        self.prune_logs()
+
+    def prune_logs(self):
+        for path in self.output.parent.glob(self.output.name + '.*'):
+            suffix = path.name[len(self.output.name) + 1:]
+            if suffix.isdigit() and path.resolve().parent == self.output.parent and (int(suffix) >= self.log_files or path.stat().st_size > self.log_bytes):
+                self.pruned_bytes += path.stat().st_size
+                path.unlink()
+
+    def write_events(self, lines):
+        for line in lines:
+            data = line.encode('utf-8')
+            if len(data) > self.log_bytes:
+                raise ValueError('event exceeds log file capacity')
+            if self.output.exists() and self.output.stat().st_size + len(data) > self.log_bytes:
+                self.rotate_logs()
+            with self.output.open('ab') as file:
+                file.write(data)
+                file.flush()
+                os.fsync(file.fileno())
+
+    def prune_snapshots(self, reserve_bytes=0, reserve_count=0):
+        folder = self.output.parent / 'snapshots'
+        if not folder.exists():
+            return
+        managed = [p for p in folder.glob('*.json') if p.resolve().parent == folder.resolve()
+                   and re.fullmatch(r'(?:diag-[a-f0-9]{64}|\d{8}T\d{12}-[\w-]+)\.json', p.name)]
+        managed.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        total = 0
+        for index, path in enumerate(managed):
+            size = path.stat().st_size
+            if index >= self.snapshot_count - reserve_count or size > self.snapshot_bytes or total + size > self.snapshot_total_bytes - reserve_bytes:
+                self.pruned_bytes += size
+                path.unlink()
+            else:
+                total += size
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -145,7 +218,10 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404)
             return
         self.reply(200, {'service': 'zhihuishu-local-debug', 'pid': os.getpid(), 'events': self.server.count,
-                         'file': self.server.output.name, 'connectedClients': len(self.server.clients)})
+                         'file': self.server.output.name, 'connectedClients': len(self.server.clients),
+                         'limits': {'logFileBytes': self.server.log_bytes, 'logFiles': self.server.log_files,
+                                    'snapshotCount': self.server.snapshot_count, 'snapshotTotalBytes': self.server.snapshot_total_bytes},
+                         'prunedBytes': self.server.pruned_bytes})
 
     def controller_allowed(self):
         return not self.headers.get('Origin') and secrets.compare_digest(
@@ -245,7 +321,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path.endswith('/snapshot'):
                 snapshot = data.get('snapshot')
-                if not isinstance(snapshot, dict) or not isinstance(snapshot.get('elements'), list) or len(snapshot['elements']) > 15000:
+                if not isinstance(snapshot, dict) or not isinstance(snapshot.get('elements'), list) or len(snapshot['elements']) > 3000:
                     self.reply(400)
                     return
                 # Sanitize each element separately; do not truncate the DOM array to the log-array limit.
@@ -255,18 +331,36 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(node, dict):
                         self.reply(400)
                         return
-                    allowed = {k: v for k, v in node.items() if k in ('parent', 'tag', 'id', 'classes', 'visible', 'bounds', 'attributes', 'url', 'text')}
+                    allowed = {k: v for k, v in node.items() if k in ('parent', 'tag', 'id', 'classes', 'visible', 'bounds', 'attributes', 'url')}
                     if allowed.get('tag') in ('input', 'textarea'):
                         allowed.pop('text', None)
                     allowed['attributes'] = {k: v for k, v in (allowed.get('attributes') or {}).items()
-                                             if k in ('role', 'aria-label', 'type', 'name', 'title', 'placeholder', 'aria-disabled', 'aria-checked')}
+                                             if k in ('role', 'type', 'name', 'aria-disabled', 'aria-checked')}
                     clean['elements'].append(sanitize(allowed))
-                snapshots = self.server.output.parent / 'snapshots'
-                snapshots.mkdir(exist_ok=True)
-                stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
-                target = snapshots / f'{stamp}-{document}.json'
-                target.write_text(json.dumps({'documentId': document, 'version': str(data.get('version', ''))[:30],
-                                             'snapshot': clean}, ensure_ascii=False), encoding='utf-8')
+                clean.pop('title', None)
+                clean['structureOnly'] = True
+                identity = json.dumps({'page': clean.get('page'), 'elements': clean['elements']}, ensure_ascii=False, sort_keys=True)
+                digest = hashlib.sha256(identity.encode('utf-8')).hexdigest()
+                content = json.dumps({'documentId': document, 'version': str(data.get('version', ''))[:30],
+                                      'snapshot': clean}, ensure_ascii=False).encode('utf-8')
+                if len(content) > min(self.server.snapshot_bytes, self.server.snapshot_total_bytes):
+                    self.reply(413)
+                    return
+                with self.server.lock:
+                    snapshots = self.server.output.parent / 'snapshots'
+                    snapshots.mkdir(exist_ok=True)
+                    target = snapshots / f'diag-{digest}.json'
+                    if not target.exists():
+                        self.server.prune_snapshots(reserve_bytes=len(content), reserve_count=1)
+                        temporary = snapshots / '.incoming.tmp'
+                        try:
+                            with temporary.open('wb') as file:
+                                file.write(content); file.flush(); os.fsync(file.fileno())
+                            temporary.replace(target)
+                        finally:
+                            if temporary.exists():
+                                temporary.unlink()
+                    self.server.prune_snapshots()
                 self.reply(204)
                 return
             events = data.get('events')
@@ -278,22 +372,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(event, dict) or not isinstance(event.get('seq'), int) or not isinstance(event.get('event'), str):
                     self.reply(400)
                     return
-                valid.append(sanitize({**event, 'documentId': document, 'version': str(data.get('version', ''))[:30],
+                valid.append(operational_event({**event, 'documentId': document, 'version': str(data.get('version', ''))[:30],
                                        'receivedAt': datetime.now(timezone.utc).isoformat()}))
             with self.server.lock:
-                lines, keys = [], set()
+                lines, keys = [], []
                 for event in valid:
                     key = (document, event['seq'])
                     if key in self.server.seen or key in keys:
                         continue
-                    keys.add(key)
+                    keys.append(key)
                     lines.append(json.dumps(event, ensure_ascii=False) + '\n')
                 if lines:
-                    with self.server.output.open('a', encoding='utf-8') as file:
-                        file.writelines(lines)
-                    for key in keys:
+                    for key, line in zip(keys, lines):
+                        self.server.write_events([line])
                         self.server.seen[key] = True
-                    self.server.count += len(lines)
+                        self.server.count += 1
                 while len(self.server.seen) > 20000:
                     self.server.seen.popitem(last=False)
         except (ValueError, TypeError, AttributeError):

@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Reproduce state-only Vue selection and native save-before-submit, including rejection guards."""
 import json
 import time
@@ -6,7 +7,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 
 ROOT=Path(__file__).resolve().parents[1]
-SOURCE=(ROOT/'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SOURCE=userscript(ROOT)
 HOST='https://ai-smart-course-student-pro.zhihuishu.com'
 EXAM='https://studentexamcomh5.zhihuishu.com'
 COURSE,CLS,POINT,PAPER,ATTEMPT='1000000000000000001','200001','31','801','17'
@@ -78,9 +79,13 @@ with sync_playwright() as p:
             if path.endswith('/questions-paper-result-page'):
                 return route.fulfill(json={'data':{'aiExamQuestionInfo':[{'id':'50001','userAnswerDtos':[{'isCorrect':1}],
                     'optionDtos':[{'content':'<p>跨平台</p>','isCorrect':1},{'content':'<p>面向对象</p>','isCorrect':1}]}]}})
+            if path.endswith('/get-node-master-max'):
+                return route.fulfill(json={'code': 200, 'data': {'masteryMax': 100}})
             if path.endswith('/questions-paper'):return route.fulfill(json={'data':{'questionNum':1,'highMasteryScore':100}})
             if path.startswith('/studentReviewTestOrExam/'):body=HTML.replace('__CASE__',case)
             elif path.startswith('/examPreview/'):body='<script>fetch("/stu/exam/questions-paper-result-page")</script>'
+            elif path.startswith('/masteryHistory/'):
+                body = '<script>fetch("/mastery-statistics/get-node-master-max")</script>'
             elif path.startswith('/learnPage/'):body='<span class="simplified-mastery__percent">100%</span><script>fetch("/stu/exam/questions-paper")</script>'
             else:body='<h1>官方结果</h1>'
             return route.fulfill(body=body,content_type='text/html; charset=utf-8')

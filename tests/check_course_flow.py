@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Exercise the userscript's normal UI through mocked course and exam pages."""
 import json
 import time
@@ -6,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import sync_playwright
 
-SOURCE = (Path(__file__).resolve().parents[1] / 'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SOURCE = userscript(Path(__file__).resolve().parents[1])
 COURSE = '1000000000000000001'
 CLASS = '200001'
 HOST = 'https://ai-smart-course-student-pro.zhihuishu.com'
@@ -82,6 +83,8 @@ def fixture(route):
         html = '<h1>测试知识点</h1><span class="simplified-mastery__percent">' + str(high) + '%</span>'
         html += f'<button class="simplified-mastery__action" onclick="location.href=\'/masteryHistory/{COURSE}/{CLASS}/{point}\'">去提升</button>'
         html += body_script(native_fetch('/stu/exam/questions-paper?point=' + point))
+    elif path.endswith('/get-node-master-max'):
+        return route.fulfill(json={'code': 200, 'data': {'masteryMax': 100 if query.get('knowledgeId', [''])[0] == '32' and submits['32'] >= 3 else 96 if query.get('knowledgeId', [''])[0] == '31' else 90}})
     elif path.endswith('/questions-paper'):
         point = query['point'][0]
         high = 100 if point == '32' and submits[point] >= 3 else 96 if point == '31' else 90
@@ -91,6 +94,7 @@ def fixture(route):
         paper = str(8000 + submits[point])
         exam_url = f'{EXAM}/studentReviewTestOrExam/17/1/1/{COURSE}/name?point=1&pointId={point}&classId={CLASS}&examPaperId={paper}'
         html = f'<button class="improve-btn" onclick="window.open(\'{exam_url}\',\'_blank\')">去提升</button>'
+        html += body_script(native_fetch('/mastery-statistics/get-node-master-max?knowledgeId=' + point))
     elif path.startswith('/studentReviewTestOrExam/'):
         point, paper = query['pointId'][0], query['examPaperId'][0]
         fill = point == '31'
@@ -186,6 +190,7 @@ with sync_playwright() as p:
     assert submits == {'31': 10, '32': 3}, (submits, task)
     assert task['index'] == 2
     assert len(task['results']) == 2
+    assert store.get('mastery-current-point-v1') is None, 'Abandonment and final completion must clear temporary answers'
     assert task['results'][0]['high'] == 96 and task['results'][0]['rounds'] == 10
     assert task['results'][1]['high'] == 100 and task['results'][1]['rounds'] == 3
     assert '一直判错的填空' in page.locator('#zhihuishu-mastery-assistant').locator('.unresolved-results').text_content()

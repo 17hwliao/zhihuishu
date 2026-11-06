@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Reproduce the real 401 pause, then check connection testing and resume without reopening a paper."""
 import json
 import time
@@ -6,7 +7,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = (ROOT / 'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SCRIPT = userscript(ROOT)
 HOST = 'https://ai-smart-course-student-pro.zhihuishu.com'
 COURSE, CLS, POINT, PAPER, ATTEMPT = '1000000000000000001', '200001', '31', '801', '17'
 URL = f'https://studentexamcomh5.zhihuishu.com/studentReviewTestOrExam/{ATTEMPT}/1/1/{COURSE}/name?point=1&pointId={POINT}&classId={CLS}&examPaperId={PAPER}'
@@ -19,7 +20,7 @@ globalThis.GM_setValue=(k,v)=>{gmState[k]=structuredClone(v);window.name=JSON.st
 function fixtureAI(data,headers){
   return nativeFetch('/__ai',{method:'POST',headers,body:data}).then(async r=>{
     const text=await r.text();
-    const test=JSON.parse(data).max_tokens===16;
+    const test=JSON.parse(data).messages[0].content==='Reply with OK only.';
     if(!test && r.status===200) setTimeout(()=>fetch('/gateway/t/v1/question/getExamQuestionInfo'),80);
     await new Promise(resolve=>setTimeout(resolve,test?0:400));
     return new Response(text,{status:r.status});
@@ -62,7 +63,7 @@ def fixture(route):
     if path=='/__ai':
         body=json.loads(request.post_data)
         assert body['model']=='deepseek-flash' and body['thinking']=={'type':'disabled'}
-        test=body['max_tokens']==16
+        test=body['messages'][0]['content']=='Reply with OK only.'
         requests.append('test' if test else 'answer')
         if request.headers.get('authorization')=='Bearer sk-fixture-invalid':
             return route.fulfill(status=401,json={'error':{'message':'The key sk-fixture-invalid was rejected','code':'invalid_api_key'}})
@@ -81,12 +82,16 @@ def fixture(route):
     if path.endswith('/questions-paper-result-page'):
         return route.fulfill(json={'data':{'aiExamQuestionInfo':[{'id':'50001','userAnswerDtos':[{'isCorrect':1}],
                     'optionDtos':[{'content':'<p>跨平台</p>','isCorrect':1},{'content':'<p>面向对象</p>','isCorrect':1}]}]}})
+    if path.endswith('/get-node-master-max'):
+        return route.fulfill(json={'code': 200, 'data': {'masteryMax': 100}})
     if path.endswith('/questions-paper'):
         return route.fulfill(json={'data':{'questionNum':1,'highMasteryScore':100}})
     if path.startswith('/studentReviewTestOrExam/'):
         html=HTML
     elif path.startswith('/examPreview/'):
         html='<script>fetch("/stu/exam/questions-paper-result-page")</script>'
+    elif path.startswith('/masteryHistory/'):
+        html = '<script>fetch("/mastery-statistics/get-node-master-max")</script>'
     elif path.startswith('/learnPage/'):
         html='<span class="simplified-mastery__percent">100%</span><script>fetch("/stu/exam/questions-paper")</script>'
     else:
@@ -119,7 +124,7 @@ with sync_playwright() as p:
     assert submits==[[True,True,False]] and len(saves)==2
     assert state['mastery-task']['results'][0]['rounds']==1
     assert requests==['answer','answer','test','answer']
-    diagnostic=json.dumps({k:v for k,v in state.items() if k.startswith('mastery-debug:')})
+    diagnostic=json.dumps({k:v for k,v in state.items() if k.startswith('mastery-panel-log-v2:')})
     assert 'sk-fixture-invalid' not in diagnostic and 'sk-fixture-recovery' not in diagnostic
     assert not errors,errors
     print('Passed: official-model 401 pause, clear error, quoted Bearer key cleanup, harmless connection test, duplicate question response, multi-select saves and one submission after resume; round remains 1.')

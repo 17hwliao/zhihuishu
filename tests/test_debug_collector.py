@@ -13,6 +13,58 @@ spec.loader.exec_module(collector)
 
 
 class CollectorTest(unittest.TestCase):
+    def test_rotation_snapshot_limits_and_content_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'events.jsonl'
+            unrelated = Path(tmp) / 'events.jsonl.keep'
+            unrelated.write_text('unrelated', encoding='utf-8')
+            server = collector.Collector(output, 0, log_bytes=900, log_files=3,
+                                         snapshot_bytes=1800, snapshot_total_bytes=3000, snapshot_count=2)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def post(path, payload):
+                connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                connection.request('POST', '/zhihuishu-debug/v1/' + path, body=json.dumps(payload),
+                                   headers={'Content-Type': 'application/json', 'X-Zhihuishu-Debug': '1'})
+                response = connection.getresponse(); status = response.status; response.read(); connection.close()
+                return status
+
+            try:
+                for index in range(1, 25):
+                    self.assertEqual(post('logs', {'documentId': 'bounded', 'events': [
+                        {'seq': index, 'event': 'answer.saved', 'data': {'source': 'ai', 'reason': 'x' * 120,
+                         'stem': 'FULL_QUESTION', 'answers': ['FULL_ANSWER'], 'response': 'FULL_AI_RESPONSE'}}]}), 204)
+                managed = [p for p in Path(tmp).glob('events.jsonl*') if p != unrelated]
+                self.assertLessEqual(len(managed), 3)
+                self.assertLessEqual(sum(p.stat().st_size for p in managed), 2700)
+                self.assertTrue(all(p.stat().st_size <= 900 for p in managed))
+                self.assertTrue(server.pruned_bytes > 0)
+                for file in managed:
+                    data = file.read_text(encoding='utf-8')
+                    self.assertNotIn('FULL_QUESTION', data)
+                    self.assertNotIn('FULL_ANSWER', data)
+                    self.assertNotIn('FULL_AI_RESPONSE', data)
+                snap = {'documentId': 'bounded', 'snapshot': {'page': 'https://example.com/page', 'time': 'one',
+                        'elements': [{'tag': 'div', 'id': 'one', 'text': 'FULL_QUESTION',
+                                      'attributes': {'role': 'group', 'title': 'FULL_ANSWER'}}]}}
+                self.assertEqual(post('snapshot', snap), 204)
+                snap['snapshot']['time'] = 'two'
+                self.assertEqual(post('snapshot', snap), 204)
+                self.assertEqual(len(list((Path(tmp) / 'snapshots').glob('*.json'))), 1)
+                for index in range(4):
+                    snap['snapshot']['elements'][0]['id'] = str(index)
+                    self.assertEqual(post('snapshot', snap), 204)
+                snapshots = list((Path(tmp) / 'snapshots').glob('*.json'))
+                self.assertLessEqual(len(snapshots), 2)
+                self.assertLessEqual(sum(p.stat().st_size for p in snapshots), 3000)
+                self.assertTrue(all('FULL_QUESTION' not in p.read_text(encoding='utf-8') and 'FULL_ANSWER' not in p.read_text(encoding='utf-8') for p in snapshots))
+                snap['snapshot']['elements'] = [{'tag': 'div', 'classes': 'x' * 200} for _ in range(100)]
+                self.assertEqual(post('snapshot', snap), 413)
+                self.assertEqual(unrelated.read_text(encoding='utf-8'), 'unrelated')
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
+
     def test_restricted_control(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = collector.Collector(Path(tmp) / 'events.jsonl', 0)
@@ -99,6 +151,24 @@ class CollectorTest(unittest.TestCase):
                 server.output = output
                 self.assertEqual(post(payload), 204)
                 self.assertEqual(server.count, 2)
+                original_write = server.write_events
+                attempted = []
+
+                def partial_failure(lines):
+                    attempted.append(1)
+                    if len(attempted) == 2:
+                        raise OSError('fixture failure after one durable event')
+                    original_write(lines)
+
+                server.write_events = partial_failure
+                payload['events'] = [{'seq': 3, 'event': 'task.state'}, {'seq': 4, 'event': 'task.state'}]
+                self.assertEqual(post(payload), 507)
+                self.assertEqual(server.count, 3)
+                server.write_events = original_write
+                self.assertEqual(post(payload), 204)
+                written = [json.loads(line)['seq'] for line in output.read_text(encoding='utf-8').splitlines()]
+                self.assertEqual(written.count(3), 1)
+                self.assertEqual(written.count(4), 1)
             finally:
                 server.shutdown()
                 server.server_close()

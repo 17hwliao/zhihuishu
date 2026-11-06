@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Verify the real modal, focus, Escape, dismissal persistence, settings/logs and task resume."""
 import json
 import time
@@ -5,7 +6,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT=Path(__file__).resolve().parents[1]
-SOURCE=(ROOT/'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SOURCE=userscript(ROOT)
 URL='https://studentexamcomh5.zhihuishu.com/studentReviewTestOrExam/17/1/1/1000000000000000001/name?point=1&pointId=31&classId=200001&examPaperId=801'
 seed={'mastery-ai':{'key':'fixture-only','model':'deepseek-flash','localLogs':False},
       'mastery-task':{'id':'pause-ui','course':'1000000000000000001','cls':'200001','active':False,'paused':True,

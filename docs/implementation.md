@@ -1,5 +1,19 @@
 # 智慧树掌握度助手：油猴版
 
+## 2.5.2 掌握度直达与简化设置
+
+调度从目录直接打开 `/masteryHistory/:courseId/:classId/:nodeUid`，nodeName 使用平台原生的 JSON → URI → Base64 编码。旧任务若停在 learnPage，先只读跳离资源页，再执行掌握度核验与原生 `.improve-btn` 入口。不调用资源播放或学习记录接口。判分后回到历史页，等待 `/mastery-statistics/get-node-master-max` 的 `data.masteryMax`；不把全对次数替代为满分。
+
+真实诊断暴露旧账号闸门仅支持 UUID 注入夹具的缺口。新版本扩展只读资料核验及明确用户封装，账号仍必须在作答前确认，换号清除原记忆。`check_mastery_entry.py` 不注入 Vue UUID，覆盖旧版卡住复现、过期任务恢复、目录直达、userId 绑定、换号、无身份时禁止写答案。这些属于隔离测试，未声明新构建已经通过真实账号验证。
+
+普通面板移除 Token、temperature、thinking 控件；自定义接口省略厂商字段，只有明确的不支持长度字段错误才自动替换一次，并缓存成功的地址/模型协议。Key 仍按地址隔离。本机日志开关移至诊断区，独立保存。
+
+## 2.5.0 当前知识点临时记忆与有界日志
+
+当前实现以[数据与日志设计](data-and-logs.md)为准：停止读取旧长期题库，使用单个当前知识点临时会话，逐次提交封存答案并按请求上下文关联判分。身份来自平台原生 UUID 状态或用户信息响应，摘要绑定任务，不读取登录凭据。默认日志只记录运行信息，待发送队列、轮转文件和结构快照均有限额。
+
+以下 2.4.x 与更早小节保留实现演进背景，其中旧题库、旧日志容量描述不适用于 2.5.0。
+
 ## 2.4.0 自定义兼容接口
 
 配置项新增 provider、baseUrl、tokenParameter、sendTemperature 与 disableThinking。默认保留既有 DeepSeek 地址、Key、模型与参数；自定义接口默认仅发送 model/messages/max_tokens，可按模型要求改用 max_completion_tokens，并显式开启 temperature 或 DeepSeek 扩展字段。地址统一解析为 Chat Completions 路径，展示规范化后的实际 URL，拒绝 URL 中的凭证、查询参数和片段。HTTPS 与本机 HTTP 可用；不适配原生 Responses/Messages 协议。
@@ -142,7 +156,7 @@ flowchart LR
 
 脚本在 `document-start` 监听页面自己发出的 XHR/fetch 响应，保留原请求行为。它不直接构造平台签名或写入掌握度；答案通过页面控件填写，由平台正常保存与判分。安装后刷新页面，让监听器能捕获首次响应。
 
-代码入口依次为 `route` → `installObservers` → `startTask/driveTask` → `fillKnownSequence/fillOne` → `officialResult`。队列、轮次、题库和 API 设置使用 `GM_getValue/GM_setValue` 存储。调度状态区分目录、知识点、历史、答题、交卷、解析和分数核验，并用任务 ID 与页面持有者避免同时提交同一任务。
+代码入口依次为 `route` → `installObservers` → `startTask/driveTask` → `fillKnownSequence/fillOne` → `officialResult`。队列、轮次、当前知识点临时记忆和 API 设置使用 `GM_getValue/GM_setValue` 存储。调度状态区分目录、知识点、历史、答题、交卷、解析和分数核验，并用任务 ID 与页面持有者避免同时提交同一任务。
 
 ## 参考项目的取舍
 

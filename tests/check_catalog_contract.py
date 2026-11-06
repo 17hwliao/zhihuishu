@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Exercise actual XHR text decoding, exempt nodes and malformed catalog diagnosis."""
 import json
 import time
@@ -6,7 +7,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = (ROOT / 'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SCRIPT = userscript(ROOT)
 HOME = 'https://ai-smart-course-student-pro.zhihuishu.com/singleCourse/knowledgeStudy/1000000000000000001/200001'
 EXACT_ID = '9223372036854775807'
 BRIDGE = r'''
@@ -58,7 +59,7 @@ with sync_playwright() as p:
         panel = page.locator('#zhihuishu-mastery-assistant')
         panel.get_by_role('button', name='开始本课程').click()
         if case == 'mixed':
-            page.wait_for_url('**/learnPage/1000000000000000001/' + EXACT_ID + '/200001?catalogActiveTab=personal')
+            page.wait_for_url('**/masteryHistory/1000000000000000001/200001/' + EXACT_ID + '?**')
             task = json.loads(page.evaluate('window.name'))['mastery-task']
             assert task['queue'][0]['point'] == EXACT_ID and len(task['queue']) == 1
         else:

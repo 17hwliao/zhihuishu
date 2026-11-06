@@ -72,3 +72,15 @@ assert.deepEqual(chatPayload({provider:'custom',model:'vendor/model',tokenParame
   {model:'vendor/model',messages:[],max_completion_tokens:512});
 assert.deepEqual(chatPayload({provider:'deepseek',model:'deepseek-flash'},[],16).thinking,{type:'disabled'});
 console.log('Helper checks passed: credential removal, safe URLs, hash routes, course IDs, exact choices and fill punctuation.');
+
+const {masteryUrl, compatibleTokenParameter} = require('../zhihuishu-mastery.user.js');
+const masteryLink = new URL(masteryUrl({course:'1001',cls:'2001',point:'31',name:'临时 + Java / 试题'}));
+assert.equal(JSON.parse(decodeURIComponent(atob(masteryLink.searchParams.get('nodeName')))), '临时 + Java / 试题');
+assert.equal(masteryLink.pathname, '/masteryHistory/1001/2001/31');
+const unsupported = JSON.stringify({error:{message:'Unsupported max_tokens. Use max_completion_tokens instead.'}});
+assert.equal(compatibleTokenParameter(400,unsupported,'max_tokens'),'max_completion_tokens');
+assert.equal(compatibleTokenParameter(422,JSON.stringify({error:{message:'max_completion_tokens not supported; use max_tokens instead'}}),'max_completion_tokens'),'max_tokens');
+for (const status of [401,403,429,500]) assert.equal(compatibleTokenParameter(status,unsupported,'max_tokens'),null);
+assert.equal(compatibleTokenParameter(400,JSON.stringify({error:{message:'Insufficient quota'}}),'max_tokens'),null);
+assert.equal(compatibleTokenParameter(400,JSON.stringify({error:{message:'max_tokens and max_completion_tokens are valid'}}),'max_tokens'),null);
+console.log('Native mastery name encoding and bounded protocol adaptation contracts passed.');

@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Exercise delayed selection, replaced Vue nodes, stale CSS and a nonfunctional control."""
 import json
 import time
@@ -6,7 +7,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 
 ROOT=Path(__file__).resolve().parents[1]
-SOURCE=(ROOT/'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SOURCE=userscript(ROOT)
 EXAM='https://studentexamcomh5.zhihuishu.com'
 COURSE,CLS,POINT,PAPER,ATTEMPT='1000000000000000001','200001','31','801','17'
 URL=f'{EXAM}/studentReviewTestOrExam/{ATTEMPT}/1/1/{COURSE}/name?point=1&pointId={POINT}&classId={CLS}&examPaperId={PAPER}'
@@ -90,7 +91,11 @@ with sync_playwright() as p:
                 return route.fulfill(json={'data':{'id':'50001','content':'<p>选择正确特性</p>','questionTypeName':'多选题',
                     'optionVos':[{'id':id,'content':f'<p>{text}</p>'} for id,text in (('10','跨平台'),('11','没有类型'),('12','静态类型'))]}})
             if path.endswith('/getExamSheetInfo'):return route.fulfill(json={'data':{'questionCount':1}})
+            if path.endswith('/get-node-master-max'):
+                return route.fulfill(json={'code': 200, 'data': {'masteryMax': 100}})
             if path.endswith('/questions-paper'):return route.fulfill(json={'data':{'questionNum':1,'highMasteryScore':100}})
+            if path.startswith('/masteryHistory/'):
+                return route.fulfill(body='<script>fetch("/mastery-statistics/get-node-master-max")</script>',content_type='text/html')
             if path.startswith('/learnPage/'):
                 return route.fulfill(body='<span class="simplified-mastery__percent">100%</span><script>fetch("/stu/exam/questions-paper")</script>',content_type='text/html')
             if path.endswith('/saveAnswer'):

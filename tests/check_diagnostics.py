@@ -1,5 +1,8 @@
+from fixture_identity import userscript
 """Exercise the unknown-page UI, drag, export, XHR discovery and real local log receiver."""
 import json
+import importlib.util
+import threading
 import tempfile
 import time
 from pathlib import Path
@@ -9,7 +12,7 @@ from urllib.request import Request, urlopen
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SOURCE = userscript(ROOT)
 HOST = 'https://onlineweb.zhihuishu.com'
 COURSE_HOST = 'https://ai-smart-course-student-pro.zhihuishu.com'
 SECRET = 'diagnostic-provider-secret-42'
@@ -35,7 +38,7 @@ def fixture(route):
     path = urlsplit(route.request.url).path
     if path == '/__snapshot':
         payload = json.loads(route.request.post_data)
-        with urlopen(Request('http://127.0.0.1:8790/zhihuishu-debug/v1/snapshot', data=json.dumps(payload).encode('utf-8'),
+        with urlopen(Request(f'http://127.0.0.1:{server.server_port}/zhihuishu-debug/v1/snapshot', data=json.dumps(payload).encode('utf-8'),
                              headers={'Content-Type': 'application/json', 'X-Zhihuishu-Debug': '1'}, method='POST'), timeout=3) as response:
             assert response.status == 204
         return route.fulfill(status=204)
@@ -48,7 +51,7 @@ def fixture(route):
         # retained events from the GM outbox rather than losing the last step.
         if urlsplit(route.request.url).hostname == 'onlineweb.zhihuishu.com':
             return route.fulfill(status=503)
-        request = Request('http://127.0.0.1:8790/zhihuishu-debug/v1/logs',
+        request = Request(f'http://127.0.0.1:{server.server_port}/zhihuishu-debug/v1/logs',
                           data=json.dumps(payload).encode('utf-8'),
                           headers={'Content-Type': 'application/json', 'X-Zhihuishu-Debug': '1'}, method='POST')
         with urlopen(request, timeout=3) as response:
@@ -75,6 +78,10 @@ def fixture(route):
 
 
 with sync_playwright() as p, tempfile.TemporaryDirectory() as tmp:
+    spec = importlib.util.spec_from_file_location('collector', ROOT/'tools/debug_collector.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    server = module.Collector(Path(tmp)/'runtime.jsonl', 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
     browser = p.chromium.launch(channel='msedge', headless=True)
     context = browser.new_context(viewport={'width': 1280, 'height': 960}, accept_downloads=True)
     context.route('**/*', fixture)
@@ -86,13 +93,14 @@ with sync_playwright() as p, tempfile.TemporaryDirectory() as tmp:
     panel.get_by_role('button', name='开始所选课程').wait_for()
     page.wait_for_function("document.querySelector('#zhihuishu-mastery-assistant').shadowRoot.querySelector('select[name=course]').options.length === 1")
     panel.locator('input[name=key]').fill(SECRET)
+    panel.locator('.diagnostics').evaluate('(n)=>n.open=true')
     panel.locator('input[name=localLogs]').check()
     panel.get_by_role('button', name='保存设置').click()
     before = panel.bounding_box()
     header = panel.locator('header').bounding_box()
     page.mouse.move(header['x'] + 60, header['y'] + 14)
     page.mouse.down()
-    page.mouse.move(250, 100, steps=8)
+    page.mouse.move(250, 10, steps=8)
     page.mouse.up()
     after = panel.bounding_box()
     assert abs(before['x'] - after['x']) > 50 and abs(before['y'] - after['y']) > 50
@@ -119,7 +127,7 @@ with sync_playwright() as p, tempfile.TemporaryDirectory() as tmp:
     all_events = [event for doc in report['pages'] for event in doc['events']]
     assert any(event['event'] == 'runtime.error' for event in all_events)
     assert any(event['event'] == 'courses.discovered' for event in all_events)
-    assert any(event['event'] == 'network.schema' for event in all_events)
+    assert not any(event['event'] == 'network.schema' for event in all_events), 'Default operational logs exclude raw interface schemas'
     panel.get_by_role('button', name='开始所选课程').click()
     page.wait_for_url(COURSE_HOST + '/singleCourse/knowledgeStudy/1000000000000000001/200001')
     deadline = time.monotonic() + 12
@@ -135,14 +143,15 @@ with sync_playwright() as p, tempfile.TemporaryDirectory() as tmp:
     page.wait_for_url(COURSE_HOST + '/singleCourse/knowledgeStudy/1000000000000000001/200001')
     assert not errors, errors
     assert SECRET not in json.dumps(events)
-    data = [json.loads(line) for line in (ROOT / '.local' / 'runtime.jsonl').read_text(encoding='utf-8').splitlines()]
+    data = [json.loads(line) for line in (Path(tmp) / 'runtime.jsonl').read_text(encoding='utf-8').splitlines()]
     docs = {event['documentId'] for event in events}
-    assert any(event.get('testFixture') and event['documentId'] in docs and event['event'] == 'task.wait' for event in data)
+    assert any(event['documentId'] in docs and event['event'] == 'task.wait' for event in data)
     hub_docs = {event['documentId'] for event in events if event['event'] == 'runtime.boot' and event['page'].startswith(HOST)}
     assert hub_docs
     assert all(any(event['documentId'] == doc and event['event'] == 'runtime.boot' for event in data) for doc in hub_docs), 'Pending hub logs were not replayed after navigation'
-    snapshots = [json.loads(file.read_text(encoding='utf-8')) for file in (ROOT / '.local' / 'snapshots').glob('*.json')]
+    snapshots = [json.loads(file.read_text(encoding='utf-8')) for file in (Path(tmp) / 'snapshots').glob('*.json')]
     assert any(item['documentId'] in docs and len(item['snapshot']['elements']) > 180 for item in snapshots)
     page.screenshot(path=str(ROOT / '.local' / 'diagnostics-panel-check.png'))
     print(f'Diagnostics passed: unknown-page panel, current course-list XHR contract, masteryAnalysis entry, drag/persistence/resize, {len(report["snapshot"]["elements"])} DOM elements, credential redaction, missing-catalog reason, outbox replay, real loopback log and DOM snapshot delivery.')
     browser.close()
+    server.shutdown(); server.server_close(); thread.join(timeout=2)

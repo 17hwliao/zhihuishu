@@ -1,3 +1,4 @@
+from fixture_identity import userscript
 """Check native browser requests, extension fallback, and failure classification without real credentials."""
 import json
 from pathlib import Path
@@ -5,7 +6,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 
 ROOT=Path(__file__).resolve().parents[1]
-SOURCE=(ROOT/'zhihuishu-mastery.user.js').read_text(encoding='utf-8')
+SOURCE=userscript(ROOT)
 HOST='https://ai-smart-course-student-pro.zhihuishu.com'
 BRIDGE=r'''
 globalThis.unsafeWindow=window;
@@ -41,7 +42,7 @@ with sync_playwright() as p:
                 assert request.headers.get('authorization')=='Bearer fixture-only-api'
                 body=json.loads(request.post_data)
                 assert body['model']=='deepseek-flash' and body['thinking']=={'type':'disabled'}
-                assert body['max_tokens']==16 and body['messages']==[{'role':'user','content':'Reply with OK only.'}]
+                assert body['max_tokens']==512 and body['messages']==[{'role':'user','content':'Reply with OK only.'}]
                 status=native_status if native else extension_status
                 if status=='network':
                     return route.abort('failed')
