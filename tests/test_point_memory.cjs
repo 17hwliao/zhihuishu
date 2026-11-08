@@ -77,6 +77,14 @@ assert.equal(JSON.stringify(memory.questions),before);
 const beforeConflict=JSON.stringify(memory.questions);
 assert.equal(grade('new',{verdict:'wrong'},'contradicting-same-result').conflicts,1);
 assert.equal(JSON.stringify(memory.questions),beforeConflict);
+// Reloading an older result can fill a previously missing reference for the
+// same verdict, without accepting a contradiction or opening another paper.
+save('enriched',9,['A']);
+grade('enriched',{verdict:'wrong'},'before-reference');
+assert.equal(grade('enriched',{verdict:'wrong',solution:['B']},'with-reference').conflicts,0);
+assert.deepEqual(memory.papers.enriched.feedback.q1.solution,['B']);
+assert.equal(grade('enriched',{verdict:'wrong',solution:['A']},'different-reference').conflicts,1);
+assert.equal(grade('enriched',{verdict:'wrong',solution:['A']},'different-reference').conflicts,1,'Reload must keep the conflict hold');
 
 const event=n=>({documentId:'page-a',seq:n,time:'test',event:'answer.saved',data:{source:'ai'}});
 let outbox=appendOutbox(null,Array.from({length:9},(_,i)=>event(i+1)),{count:5,bytes:4096});

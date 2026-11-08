@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智慧树 · 掌握度助手
 // @namespace    local.zhihuishu.mastery
-// @version      2.5.7
+// @version      2.5.8
 // @homepageURL  https://github.com/17hwliao/zhihuishu
 // @supportURL   https://github.com/17hwliao/zhihuishu/issues
 // @updateURL    none
@@ -27,9 +27,9 @@
     'use strict';
     const LEARN_HOST = 'ai-smart-course-student-pro.zhihuishu.com';
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
-    const VERSION = '2.5.7';
+    const VERSION = '2.5.8';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-eb257dca3933';
+    const BUILD = 'dev-4a6ae8cd31ea';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
     const courseUrl = ({ course, cls }) =>
         `https://${LEARN_HOST}/singleCourse/knowledgeStudy/${course}/${cls}`;
@@ -364,7 +364,7 @@
                     for (const [id, evidence] of Object.entries(answer.evidence))
                         if (id.startsWith(`${paper.id}:${row.id}:`)) evidence.feedback = previous.feedback;
             }
-            return { accepted: true, duplicate: true, verdict: paper.verdict ?? 'unknown' };
+            return { accepted: true, duplicate: true, verdict: paper.verdict ?? 'unknown', conflicts: paper.gradeConflicts ?? 0 };
         }
         if (new Set(rows.map(row => row.id)).size !== rows.length) return { accepted: false, reason: 'duplicate-question-id' };
         let linked = 0, conflicts = 0;
@@ -374,7 +374,9 @@
             const previous = paper.feedback[row.id];
             const identity = value => JSON.stringify([value.verdict, value.solution ? answerKey(value.solution, submitted.kind) : null, Boolean(value.definitionMismatch)]);
             if (previous && previous.verdict !== 'unknown' && identity(previous) !== identity(row)) {
-                conflicts++; continue;
+                if (previous.verdict !== row.verdict || previous.solution || !row.solution) {
+                    conflicts++; continue;
+                }
             }
             linked++;
             paper.feedback[row.id] = row;
@@ -393,7 +395,7 @@
         const feedback = Object.values(paper.feedback);
         const verdict = linked < rows.length || conflicts ? 'unknown' : feedback.some(row => row.verdict === 'wrong') ? 'wrong'
             : feedback.length === paper.count && feedback.every(row => row.verdict === 'correct') ? 'perfect' : 'unknown';
-        paper.verdict = verdict; paper.status = 'graded';
+        Object.assign(paper, { verdict, status: 'graded', gradeConflicts: conflicts });
         memory.rounds = recordRound(memory.rounds, paper.id, verdict, paper.id)
             .sort((a, b) => memory.papers[a.key].round - memory.papers[b.key].round);
         return { accepted: true, duplicate: false, verdict, conflicts };
@@ -747,7 +749,7 @@
             const id = String(item.id), saved = submission.questions[id], definition = saved?.definition;
             const flags = resultVerdict([item]);
             const row = { id, verdict: flags === 'perfect' ? 'correct' : flags === 'wrong' ? 'wrong' : 'unknown',
-                feedback: ['analysis', 'questionAnalysis', 'answerAnalysis', 'explanation'].map(k => item[k])
+                feedback: [item.analysisDto?.analyze, item.analysis, item.questionAnalysis, item.answerAnalysis, item.explanation]
                     .filter(v => typeof v === 'string').slice(0, 2).map(textOf).join(' ').slice(0, 600), solution: null };
             if (!saved) return row;
             const echo = submittedEchoMatches(saved, item.userAnswerDtos ?? [],
@@ -761,8 +763,9 @@
                 const solution = (item.optionDtos ?? []).filter(o => String(o.isCorrect) === '1').map(o => optionKey(o.content));
                 if (solution.length && solution.every(key => definition.options.includes(key))) row.solution = solution.sort();
             } else {
-                const solution = Array.isArray(item.result) ? item.result : typeof item.result === 'string' ? item.result.split('#@#') : [];
-                if (solution.length === definition.blanks.length && solution.every(v => typeof v === 'string' && v.trim())) row.solution = solution;
+                const solution = blankReference(item, definition.blanks.length);
+                if (solution && (row.verdict !== 'wrong' || answerKey(solution, 'blank') !== answerKey(saved.answers, 'blank')))
+                    row.solution = solution;
             }
             return row;
         });
@@ -773,14 +776,25 @@
         const digest = await hashText(JSON.stringify([...rows].sort((a, b) => a.id.localeCompare(b.id))
             .map(row => [row.id, row.verdict, row.solution, Boolean(row.definitionMismatch)])));
         const latest = pointMemory();
-        if (!latest || !scopeEqual(latest.scope, context.scope)) return;
+        if (!latest || !scopeEqual(latest.scope, context.scope) || location.href !== at) return;
         const outcome = applyMemoryGrade(latest, context, rows, digest);
         if (!outcome.accepted) { log('warn', 'memory.result-unlinked', { reason: outcome.reason }); return; }
         GM_setValue(MEMORY_KEY, latest);
-        log('info', 'memory.graded', { verdict: outcome.verdict, duplicate: Boolean(outcome.duplicate), conflicts: outcome.conflicts ?? 0 });
+        log('info', 'memory.graded', { verdict: outcome.verdict, duplicate: Boolean(outcome.duplicate), conflicts: outcome.conflicts ?? 0,
+            blankReferences: rows.filter(row => row.solution && !row.definitionMismatch && submission.questions[row.id]?.kind === 'blank').length });
         if (readTask()?.submissionId === context.submissionId && view().key === page.key) {
-            grade = { at: location.href, key: page.key, submissionId: context.submissionId, verdict: outcome.verdict, count: items.length };
-            if (!outcome.duplicate) setMessage(outcome.verdict === 'perfect' ? '本轮平台判定全对' : outcome.verdict === 'wrong'
+            const graded = latest.papers[context.submissionId];
+            const blockedBlanks = Object.values(graded.questions).filter(saved => {
+                if (saved.kind !== 'blank') return false;
+                const result = graded.feedback[saved.id];
+                if (!result || result.verdict === 'unknown') return true;
+                if (result.verdict === 'correct') return false;
+                const solution = result.solution && latest.questions[saved.fingerprint]?.answers[answerKey(result.solution, 'blank')];
+                return !solution || answerState(solution) !== 'correct';
+            }).length;
+            grade = { at: location.href, key: page.key, submissionId: context.submissionId, verdict: outcome.verdict, count: items.length,
+                blockedBlanks, conflicts: outcome.conflicts ?? 0 };
+            if (!outcome.duplicate && !blockedBlanks && !grade.conflicts) setMessage(outcome.verdict === 'perfect' ? '本轮平台判定全对' : outcome.verdict === 'wrong'
                 ? '本轮有错题，已按对应提交记录纠错' : '判分证据尚不完整，等待平台确认');
         }
     }
@@ -1128,6 +1142,19 @@
             ? fields : null;
     }
 
+    function blankReference(item, count) {
+        // The platform's preview renders correct optionDtos in response order,
+        // joining their display text only after it has separated the blanks.
+        const correct = Array.isArray(item.optionDtos) ? item.optionDtos.filter(option => String(option?.isCorrect) === '1') : [];
+        const fields = correct.map(({ content }) => {
+            if (typeof content !== 'string' || /<(?:img|svg|math|video|iframe|object|embed)\b/i.test(content)) return null;
+            return /<\/?(?:p|div|span|br|pre|code|b|strong|em|i|sub|sup)\b|&(?:#\d+|#x[\da-f]+|[a-z]+);/i.test(content)
+                ? htmlDoc(content).textContent : content;
+        });
+        const legacy = Array.isArray(item.result) ? item.result : typeof item.result === 'string' ? item.result.split('#@#') : [];
+        return [fields, legacy].find(values => values.length === count && values.every(v => typeof v === 'string' && v.trim())) ?? null;
+    }
+
     function questionForDOM(root, captured) {
         if (!captured) return null;
         const title = $(`${TITLE},.centent-pre .preStyle,.question-title`, root);
@@ -1276,33 +1303,19 @@
 
     function trialAnswer(q, reason, context) {
         if (!aiConfig().guessFallback || operationCancelled()) throw unavailableAnswer(reason);
-        let answer;
-        if (q.inputs) {
-            for (let attempt = 0; attempt < 32; attempt++) {
-                answer = q.inputs.map(() => String(Math.floor(Math.random() * 10)));
-                if (!isKnownFailure(context, answer, 'blank')) break;
-            }
-        } else {
-            const candidates = [];
-            for (let mask = 1; mask < 2 ** q.options.length; mask++) {
-                const indices = q.options.map((_, i) => i).filter(i => mask & (1 << i));
-                if ((!q.multi && indices.length !== 1) || isKnownFailure(context, indices.map(i => q.options[i]), 'choice')) continue;
-                candidates.push(indices);
-            }
-            if (!candidates.length) {
-                log('warn', 'answer.trial-exhausted', { question: q.id });
-                // If the platform exposes no usable correction, the per-point round cap still bounds exploration.
-                for (let i = 0; i < q.options.length; i++) candidates.push([i]);
-            }
-            answer = candidates[Math.floor(Math.random() * candidates.length)];
+        const candidates = [];
+        for (let mask = 1; mask < 2 ** q.options.length; mask++) {
+            const indices = q.options.map((_, i) => i).filter(i => mask & (1 << i));
+            if ((!q.multi && indices.length !== 1) || isKnownFailure(context, indices.map(i => q.options[i]), 'choice')) continue;
+            candidates.push(indices);
         }
-        log('warn', 'answer.trial', { question: q.id, type: q.inputs ? 'blank' : 'choice', reason });
+        if (!candidates.length) throw unavailableAnswer('本题可识别的选项组合均已判错，已暂停');
+        log('warn', 'answer.trial', { question: q.id, type: 'choice', reason });
         setMessage('AI 暂无可用答案，本题尝试作答，交卷后收集平台解析');
-        return answer;
+        return candidates[Math.floor(Math.random() * candidates.length)];
     }
 
     async function fillBlanks(q, allowAI, key, savedRecord = null) {
-        let trial = false;
         const context = await questionMemory(q);
         const resumed = savedRecord?.saved && savedRecord.fingerprint === context.fingerprint && savedRecord.kind === 'blank';
         let values = fillValues(resumed ? savedRecord.answers : confirmedAnswers(context.entry), q.inputs.length);
@@ -1314,7 +1327,7 @@
                 values = await askAI(q, context, key);
             } catch (error) {
                 if (error.recoverable !== 'answer-unavailable') throw error;
-                values = trialAnswer(q, error.message, context); trial = true;
+                throw unavailableAnswer(`填空题缺少可用答案（${error.message}），已保留原卷并暂停`);
             }
         }
         if (!values) throw Error('填空答案无法对应到全部空位');
@@ -1343,8 +1356,8 @@
             || !actual.inputs.every((el, i) => (el.isContentEditable ? el.textContent : el.value) === values[i]))
             throw Error('未能确认填空值完整写入');
         await confirmAnswerSaved(q, before, values);
-        setMessage(trial ? '尝试填空已保存，交卷后收集解析' : '填空已保存');
-        await rememberAnswer(q, values, resumed ? 'resumed' : trial ? 'trial' : verified ? 'confirmed' : 'ai', context);
+        setMessage(verified ? '已复用并保存平台确认的填空答案' : '填空已保存');
+        await rememberAnswer(q, values, resumed ? 'resumed' : verified ? 'confirmed' : 'ai', context);
         return true;
     }
 
@@ -1488,6 +1501,7 @@
                 const retained = pointMemory()?.papers[readTask()?.paperInstance]?.questions[q.id];
                 const context = await questionMemory(q);
                 const resumed = seen.has(q.id) && retained?.saved && retained.fingerprint === context.fingerprint
+                    && !(q.inputs && retained.source === 'trial')
                     && !isKnownFailure(context, retained.answers, retained.kind);
                 const visibleAnswers = q.inputs ? q.inputs.map(el => el.isContentEditable ? el.textContent : el.value)
                     : q.nodes.flatMap((el, i) => checked(el) ? [q.dom[i]] : []);
@@ -2071,6 +2085,8 @@
         if (resumeUrl) {
             clearQuestions(); sheet = paper = grade = null;
             location.assign(resumeUrl);
+        } else if (destination.phase === 'preview' && (!grade || grade.blockedBlanks || grade.conflicts)) {
+            location.reload();
         }
     }
 
@@ -2289,8 +2305,15 @@
                     if (nextPhase(task, 'preview', '读取平台解析与判分')) preview(page);
                 } else confirmSubmit(task);
             } else if (task.phase === 'preview') {
-                if (grade?.at !== location.href || grade.key !== task.examKey) { waitFor('official-result-missing'); return; }
+                if (grade?.at !== location.href || grade.key !== task.examKey
+                    || (!grade.unlinked && grade.submissionId !== task.submissionId)) { waitFor('official-result-missing'); return; }
                 if (grade.count !== task.count) throw Error('解析题数与本次作答题数不一致');
+                if (grade.conflicts) throw Error('同一试卷的判分记录有冲突，已暂停自动重试');
+                if (grade.blockedBlanks) {
+                    log('warn', 'answer.blank-reference-unavailable', { count: grade.blockedBlanks, round: current.rounds });
+                    pauseTask(`${grade.blockedBlanks} 道填空的判分或逐空参考答案未能核对，已保留解析页并暂停开新卷`);
+                    return;
+                }
                 taskNavigate(task, { phase: 'verify', message: '重新读取平台最高掌握度' },
                     masteryUrl({ ...task, point: current.point, name: current.name }));
             }
@@ -2480,7 +2503,7 @@
                     <label>模型名<input name="model" type="text" placeholder="填写服务商提供的模型名称" autocomplete="off"></label>
                     <label>每个知识点最多尝试次数
                       <input name="limit" type="number" value="10" min="1" max="10" step="1" required></label>
-                    <label><input name="guessFallback" type="checkbox">AI 无法作答时尝试答案，交卷后收集解析</label>
+                    <label><input name="guessFallback" type="checkbox">AI 无法作答时尝试选择题答案，交卷后收集解析</label>
                     <div class="row"><button type="submit">保存设置</button><button type="button" class="test-api">测试 API 连接</button><button type="button" class="clear-key">清除 Key</button></div>
                     <p class="api-status" role="status"></p>
                   </form>

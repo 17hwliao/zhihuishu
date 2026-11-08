@@ -40,7 +40,9 @@ def seed(paused=True, phase='answering', answered=None, fallback=True):
 
 def run(browser, case):
     resume = case in ('paused-course', 'stale-course', 'refresh-paper', 'later-question', 'submit-unknown', 'sealed-recovery')
-    blanks = case == 'blank-trial'
+    blanks = case.startswith('blank-')
+    reference = ['存在纯虚根', '用正无穷小取代 0元']
+    partial_reference = case == 'blank-partial'
     commits, saves, calls, errors, visits = [], [], [], [], []
     state_seed = seed(paused=case in ('paused-course', 'refresh-paper', 'later-question', 'submit-unknown'),
                       phase='submitting' if case == 'submit-unknown' else 'answering',
@@ -71,17 +73,18 @@ def run(browser, case):
         if path == '/__ai':
             calls.append(1)
             if case == 'unauthorized': return route.fulfill(status=401, json={'error': {'message': 'invalid'}})
-            answer = '["B"]' if resume else '' if blanks else '这道题我无法判断'
+            answer = '["B"]' if resume else '' if case == 'blank-trial' else '["5","0"]' if blanks else '这道题我无法判断'
             return route.fulfill(json={'choices': [{'message': {'content': answer}}]})
         if path.endswith('/getExamQuestionInfo'):
             index = '1' if 'index=1' in route.request.url else '0'
             return route.fulfill(json={'data': {'id': '50002' if index == '1' else '50001',
                 'content': '<p>填写数值</p>' if blanks else '<p>选择正确答案</p>', 'questionTypeName': '填空题' if blanks else '单选题',
-                'optionVos': [] if blanks else [{'id': '10', 'content': '<p>错误项</p>'}, {'id': '11', 'content': '<p>正确项</p>'}]}})
+                'optionVos': [{'id': '31', 'content': ''}, {'id': '32', 'content': ''}] if blanks else
+                [{'id': '10', 'content': '<p>错误项</p>'}, {'id': '11', 'content': '<p>正确项</p>'}]}})
         if path.endswith('/getExamSheetInfo'):
             return route.fulfill(json={'data': {'questionCount': 2 if resume else 1}})
         if path.endswith('/saveAnswer'):
-            saves.append(1)
+            saves.append(route.request.post_data if blanks else 1)
             return route.fulfill(json={'code': 200, 'data': True})
         if path == '/__new_round':
             visits.append('new-round')
@@ -91,9 +94,16 @@ def run(browser, case):
             return route.fulfill(json={'ok': True})
         if path.endswith('/questions-paper-result-page'):
             count = 2 if resume else 1
-            items = [{'id': str(50001+i), 'analysis': '<p>官方解析：应选择正确项或填写 42。</p>',
+            items = [{'id': str(50001+i), 'analysisDto': {'analyze': '<p>官方解析</p>'},
                       'userAnswerDtos': [{'isCorrect': 1 if resume or len(commits)>1 else 0}],
-                      **({'result': '42'} if blanks else {'optionDtos': [{'content': '<p>正确项</p>', 'isCorrect': 1}]})} for i in range(count)]
+                      'optionDtos': [{'content': '<p>正确项</p>', 'isCorrect': 1}]} for i in range(count)]
+            if blanks:
+                values = ['5', '0'] if case == 'blank-contradiction' else reference[:1] if partial_reference else reference
+                items[0]['content'] = '<p>填写数值</p>'
+                items[0]['questionTypeName'] = '填空题'
+                items[0]['userAnswerDtos'][0]['answer'] = '#@#'.join(json.loads(commits[-1]))
+                items[0]['optionDtos'] = [{'content': '错误项', 'isCorrect': 0}] + [
+                    {'content': f'<span>{value}</span>', 'isCorrect': '1' if i else 1} for i, value in enumerate(values)]
             return route.fulfill(json={'data': {'aiExamQuestionInfo': items}})
         if path.endswith('/get-node-master-max'):
             return route.fulfill(json={'code': 200, 'data': {'masteryMax': 96 if case == 'abandon-point' else 100 if resume or len(commits) >= 2 else 96}})
@@ -110,7 +120,7 @@ let index=__START__;
 const owner={
  $route:{params:{examTestId:'17',recruitId:'1000000000000000001'},query:{examPaperId:'801',point:'1',pointId:'31',classId:'200001'}},
  $options:{methods:{saveAnswer(){}}},currentQues:{},reviewTopicData:{},userAnswer:'',
- saveAnswer(){return fetch('/answer/saveAnswer',{method:'POST'})}
+ saveAnswer(){return fetch('/answer/saveAnswer',{method:'POST',body:this.userAnswer})}
 };
 function render(){
  const root=document.querySelector('.questionContent');
@@ -118,15 +128,16 @@ function render(){
  root.innerHTML='<div class="centent-pre"><pre class="preStyle">__STEM__</pre></div>';
  root.innerHTML+=__INPUT__;
  root.querySelectorAll('li').forEach(n=>n.onclick=()=>{root.querySelectorAll('li').forEach(x=>x.classList.remove('active'));n.classList.add('active');owner.userAnswer=n.textContent==='正确项'?'11':'10';fetch('/answer/saveAnswer',{method:'POST'})});
- root.querySelector('input')?.addEventListener('change',e=>{owner.userAnswer=e.target.value;fetch('/answer/saveAnswer',{method:'POST'})});
+ const inputs=Array.from(root.querySelectorAll('input'));
+ inputs.forEach(input=>input.addEventListener('change',()=>{owner.userAnswer=inputs.map(el=>el.value).join('#@#')}));
  document.querySelector('.next-topic').hidden=__ONE__;
  document.querySelector('.next-topic').disabled=!!index;
  fetch('/question/getExamQuestionInfo?index='+index);
 }
 document.querySelector('.next-topic').onclick=()=>{index=1;render()};
-document.querySelector('.reviewDone').onclick=async()=>{await fetch('/__submit',{method:'POST',body:document.querySelector('.questionContent').innerText});location.href='__RESULT__'};
+document.querySelector('.reviewDone').onclick=async()=>{await fetch('/__submit',{method:'POST',body:JSON.stringify(Array.from(document.querySelectorAll('.questionContent input'),el=>el.value))});location.href='__RESULT__'};
 render();fetch('/getExamSheetInfo');</script>'''
-            inputs = '<input>' if blanks else '<ul class="radio-view"><li class="clearfix"><pre class="preStyle">错误项</pre></li><li class="clearfix"><pre class="preStyle">正确项</pre></li></ul>'
+            inputs = '<input><input>' if blanks else '<ul class="radio-view"><li class="clearfix"><pre class="preStyle">错误项</pre></li><li class="clearfix"><pre class="preStyle">正确项</pre></li></ul>'
             # Only the initial manual later-question page starts at the last question.
             start = '1' if case == 'later-question' and len(visits) == 1 else '0'
             html = html.replace('__START__', start).replace('__STEM__', '填写数值' if blanks else '选择正确答案').replace('__INPUT__', json.dumps(inputs))
@@ -158,10 +169,23 @@ render();fetch('/getExamSheetInfo');</script>'''
         page.reload()
     if case in ('paused-course', 'stale-course', 'refresh-paper', 'later-question', 'submit-unknown'):
         panel.get_by_role('button', name='继续任务', exact=True).click()
-    if case in ('unauthorized', 'fallback-off'):
+    if case in ('unauthorized', 'fallback-off', 'blank-trial'):
         page.wait_for_function("JSON.parse(window.name||'{}')['mastery-task']?.paused")
         assert not saves and not commits
         assert 'trialAnswers' not in json.dumps(json.loads(page.evaluate('window.name')))
+    elif case in ('blank-partial', 'blank-contradiction'):
+        page.wait_for_function("JSON.parse(window.name||'{}')['mastery-task']?.paused")
+        task = json.loads(page.evaluate('window.name'))['mastery-task']
+        assert task['phase'] == 'preview' and '逐空参考答案未能核对' in task['message'], task
+        assert task['queue'][0]['rounds'] == 1 and 'new-round' not in visits
+        assert saves == ['5#@#0'] and list(map(json.loads, commits)) == [['5', '0']] and len(calls) == 1
+        if case == 'blank-partial':
+            partial_reference = False
+            page.get_by_role('alertdialog').get_by_role('button', name='稍后处理').click()
+            panel.get_by_role('button', name='继续任务', exact=True).click()
+            page.wait_for_function("JSON.parse(window.name||'{}')['mastery-auto']?.status==='completed'")
+            assert list(map(json.loads, commits)) == [['5', '0'], reference] and len(calls) == 1
+            assert saves == ['5#@#0', '#@#'.join(reference)] and visits.count('new-round') == 1
     else:
         try:
             page.wait_for_function("JSON.parse(window.name||'{}')['mastery-auto']?.status==='completed'", timeout=25000)
@@ -186,6 +210,9 @@ render();fetch('/getExamSheetInfo');</script>'''
             assert task['queue'][0]['rounds'] == 1
         else:
             assert len(commits) == 2 and len(calls) == 1  # Old rejected records are deliberately not read
+            if case == 'blank-reference':
+                assert list(map(json.loads, commits)) == [['5', '0'], reference]
+                assert saves == ['5#@#0', '#@#'.join(reference)]
             assert task['queue'][0]['rounds'] == 2
             assert state.get('mastery-current-point-v1') is None
             assert state.get(f'point:{COURSE}:{CLS}:31:bank') is None
@@ -199,6 +226,7 @@ if __name__ == '__main__':
     with sync_playwright() as p:
         browser = p.chromium.launch(channel='msedge', headless=True)
         for case in sys.argv[1:] or ('paused-course', 'stale-course', 'refresh-paper', 'later-question', 'submit-unknown',
-                                    'choice-trial', 'blank-trial', 'unauthorized', 'fallback-off'):
+                                    'choice-trial', 'blank-trial', 'blank-reference', 'blank-partial', 'blank-contradiction',
+                                    'unauthorized', 'fallback-off'):
             run(browser, case)
         browser.close()

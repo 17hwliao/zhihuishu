@@ -66,13 +66,13 @@ def fixture(route):
         payload = json.loads(req.post_data)
         data = json.loads(payload['messages'][1]['content'])
         ai_calls.append(data)
-        answer = ['int x=2;'] if data['blanks'] else ['A']
+        answer = ['int x=1;'] if data['blanks'] else ['A']
         return route.fulfill(json={'choices': [{'message': {'content': json.dumps(answer)}}]})
     if path.endswith('/list-knowledge-theme'):
         return route.fulfill(json={'data': {'courseThemeList': [{'subThemeList': [{'knowledgeList': [
             {'knowledgeId': '30', 'knowledgeName': '已满分', 'masteryPercentage': 100},
             {'knowledgeId': '29', 'knowledgeName': '免考不应阻断', 'masteryPercentage': None},
-            {'knowledgeId': '31', 'knowledgeName': '一直判错的填空', 'masteryPercentage': 96},
+            {'knowledgeId': '31', 'knowledgeName': '掌握度停在 96%', 'masteryPercentage': 96},
             {'knowledgeId': '32', 'knowledgeName': '连续三次全对', 'masteryPercentage': 90},
         ]}]}]}})
     if path.startswith('/singleCourse/'):
@@ -113,7 +113,7 @@ def fixture(route):
             li.classList.add('active'); save();
           }});
           document.querySelector('.reviewDone').onclick = async () => {{
-            await fetch('/__submit?point={point}', {{method:'POST'}});
+            await fetch('/__submit?point={point}', {{method:'POST',body:document.querySelector('#answer')?.value}});
             location.href={json.dumps(point_url)};
           }};
           {native_fetch('/gateway/t/v1/question/getExamQuestionInfo?point=' + point)}
@@ -131,7 +131,10 @@ def fixture(route):
     elif path.endswith('/saveAnswer'):
         return route.fulfill(json={'code': 200, 'data': True})
     elif path == '/__submit':
-        submits[query['point'][0]] += 1
+        point = query['point'][0]
+        submits[point] += 1
+        if point == '31':
+            assert req.post_data == ('int x=1;' if submits[point] == 1 else 'int x=2;')
         return route.fulfill(json={'ok': True})
     elif path.startswith('/point/'):
         html = '<p>提交后的平台结果</p>'
@@ -140,7 +143,7 @@ def fixture(route):
         html = '<p>平台解析</p>' + body_script(native_fetch('/stu/exam/questions-paper-result-page?point=' + point))
     elif path.endswith('/questions-paper-result-page'):
         point = query['point'][0]
-        q = {'id': '500' + point, 'userAnswerDtos': [{'isCorrect': 0 if point == '31' else 1}]}
+        q = {'id': '500' + point, 'userAnswerDtos': [{'isCorrect': int(point != '31' or submits[point] > 1)}]}
         if point == '31':
             q['result'] = 'int x=2;'
         else:
@@ -193,9 +196,9 @@ with sync_playwright() as p:
     assert store.get('mastery-current-point-v1') is None, 'Abandonment and final completion must clear temporary answers'
     assert task['results'][0]['high'] == 96 and task['results'][0]['rounds'] == 10
     assert task['results'][1]['high'] == 100 and task['results'][1]['rounds'] == 3
-    assert '一直判错的填空' in page.locator('#zhihuishu-mastery-assistant').locator('.unresolved-results').text_content()
+    assert '掌握度停在 96%' in page.locator('#zhihuishu-mastery-assistant').locator('.unresolved-results').text_content()
     assert '10 轮' in page.locator('#zhihuishu-mastery-assistant').locator('.unresolved-results').text_content()
-    assert any(call['previouslyIncorrect'] for call in ai_calls)
+    assert len(ai_calls) == 2 and sum(bool(call['blanks']) for call in ai_calls) == 1
     assert any(event['event'] == 'question.captured' for event in debug_events)
     assert any(event['event'] == 'task.state' for event in debug_events)
     assert not any(event['event'] in ('runtime.error', 'runtime.rejection', 'scheduler.failed') for event in debug_events)
@@ -204,6 +207,6 @@ with sync_playwright() as p:
     screenshot = Path(__file__).resolve().parents[1] / '.local' / 'mastery-panel-check.png'
     screenshot.parent.mkdir(exist_ok=True)
     context.pages[-1].screenshot(path=str(screenshot))
-    print('Full userscript flow passed: API settings, course discovery, same-tab handoff, ten failed fill rounds, three perfect rounds, automatic submission, results and live score verification.')
+    print('Full userscript flow passed: API settings, course discovery, same-tab handoff, corrected fill and ten-round stagnant mastery cap, three perfect rounds, submission and score verification.')
     print(f'Native submit counts {submits}; AI calls {len(ai_calls)}; browser tabs {len(context.pages)}.')
     browser.close()

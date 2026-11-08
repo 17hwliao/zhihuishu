@@ -80,7 +80,8 @@ if __name__ == '__main__':
                 index = int(parse_qs(parts.query)['index'][0]); round_number = int(parse_qs(parts.query)['round'][0])
                 options = [{'id': '10', 'content': '<p>错误项</p>'}, {'id': '11', 'content': '<p>正确项</p>'}]
                 if round_number > 1: options.reverse()
-                return route.fulfill(json={'data': {'id': str(50001+index), 'content': '<p>CODE_VALUE</p>' if index else '<p>CLASSIFY_JS</p>',
+                stem = 'CODE_VALUE_7' if round_number >= 7 else 'CODE_VALUE'
+                return route.fulfill(json={'data': {'id': str(50001+index), 'content': f'<p>{stem}</p>' if index else '<p>CLASSIFY_JS</p>',
                     'questionTypeName': '填空题' if index else '单选题', 'optionVos': [] if index else options}})
             if path.endswith('/getExamSheetInfo'):
                 return route.fulfill(json={'data': {'questionCount': 2}})
@@ -94,8 +95,8 @@ if __name__ == '__main__':
                 rows = [{'id': '50001', 'userAnswerDtos': [{'isCorrect': 1}],
                          'optionDtos': [{'content': '<p>正确项</p>', 'isCorrect': 1}]},
                         {'id': '50002', 'analysis': 'numeric/code feedback for this question only',
-                         'userAnswerDtos': [{'isCorrect': 1 if len(submissions) == 8 else 0}]}]
-                if len(submissions) >= 7: rows[1]['result'] = '  int X = 2;  '
+                         'userAnswerDtos': [{'isCorrect': int(len(submissions) not in (1, 7))}]}]
+                rows[1]['result'] = '  int X = 2;  ' if len(submissions) >= 7 else '  correct();  '
                 return route.fulfill(json={'data': {'aiExamQuestionInfo': rows}})
             if path.endswith('/get-node-master-max'):
                 return route.fulfill(json={'code': 200, 'data': {'masteryMax': 100 if len(submissions) >= 8 else 96}})
@@ -107,7 +108,7 @@ if __name__ == '__main__':
 <button class="reviewDone">交卷</button><script>
 window.fixtureRound=__ROUND__;let index=0;
 function render(){const root=document.querySelector('.questionContent');
-root.innerHTML='<div class="centent-pre"><pre class="preStyle">'+(index?'CODE_VALUE':'CLASSIFY_JS')+'</pre></div>';
+root.innerHTML='<div class="centent-pre"><pre class="preStyle">'+(index?(window.fixtureRound>=7?'CODE_VALUE_7':'CODE_VALUE'):'CLASSIFY_JS')+'</pre></div>';
 root.innerHTML+=index?'<input>':__OPTIONS__;
 root.querySelectorAll('li').forEach(n=>n.onclick=()=>{root.querySelectorAll('li').forEach(x=>x.classList.remove('active'));n.classList.add('active');fetch('/answer/saveAnswer',{method:'POST'})});
 root.querySelector('input')?.addEventListener('change',()=>fetch('/answer/saveAnswer',{method:'POST'}));
@@ -152,8 +153,8 @@ render();fetch('/getExamSheetInfo');</script>'''
         after = json.loads(page.evaluate('window.name'))
         assert after[MEMORY] == before[MEMORY], 'Pause/reload must keep all seventh-round evidence and correction budget'
         assert after['mastery-task']['queue'][0]['rounds'] == 7
-        assert '已确认正确 1' in panel.locator('.memory-summary').text_content()
-        assert '待纠错 1' in panel.locator('.memory-summary').text_content()
+        assert '已确认正确 2' in panel.locator('.memory-summary').text_content()
+        assert '待纠错 0' in panel.locator('.memory-summary').text_content()
         panel.locator('.scan-actions button').evaluate('(button)=>{for(let i=0;i<750;i++)button.click()}')
         page.wait_for_timeout(700)
         state = json.loads(page.evaluate('window.name'))
@@ -165,6 +166,7 @@ render();fetch('/getExamSheetInfo');</script>'''
         panel.get_by_role('button', name='继续任务', exact=True).click()
         final = wait_state(page, "v['mastery-auto']?.status==='completed'", 35000)
         assert len(submissions) == 8 and final['mastery-task']['results'][0]['high'] == 100
+        assert submissions[1:6] == [['  correct();  ']] * 5
         assert final['mastery-task']['results'][0]['rounds'] == 8
         assert MEMORY not in final, 'Completion must delete all point answers and feedback'
         assert f'point:{COURSE}:{CLS}:{POINT}:bank' not in final
