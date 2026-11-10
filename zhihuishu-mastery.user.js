@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智慧树 · 掌握度助手
 // @namespace    local.zhihuishu.mastery
-// @version      2.5.10
+// @version      2.5.11
 // @homepageURL  https://github.com/17hwliao/zhihuishu
 // @supportURL   https://github.com/17hwliao/zhihuishu/issues
 // @updateURL    none
@@ -27,9 +27,9 @@
     'use strict';
     const LEARN_HOST = 'ai-smart-course-student-pro.zhihuishu.com';
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
-    const VERSION = '2.5.10';
+    const VERSION = '2.5.11';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-8c75ecc30fa6';
+    const BUILD = 'dev-fef4c49b596b';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
     const courseUrl = ({ course, cls }) =>
         `https://${LEARN_HOST}/singleCourse/knowledgeStudy/${course}/${cls}`;
@@ -717,6 +717,7 @@
         || [q.captured.content, ...(q.captured.optionVos ?? []).map(option => option.content)]
             .some(html => /<(?:img|svg|math|video|iframe|object|embed)\b/i.test(html));
     const imageLayoutStyles = new Set(['width', 'height', 'min-width', 'min-height', 'max-width', 'max-height', 'vertical-align']);
+    const formulaExportHost = 'hike-export.oss-cn-hangzhou.aliyuncs.com';
     function contentParts(html) {
         if (typeof html !== 'string') return null;
         const body = htmlDoc(html);
@@ -738,7 +739,12 @@
                 const src = node.getAttribute('src')?.trim();
                 if (!src) return false;
                 let url;
-                try { url = new URL(src, location.href).href; } catch { return false; }
+                try {
+                    const asset = new URL(src, location.href);
+                    if (asset.protocol === 'http:' && [formulaExportHost, 'image.zhihuishu.com'].includes(asset.hostname))
+                        asset.protocol = 'https:';
+                    url = asset.href;
+                } catch { return false; }
                 const styles = Array.from(node.style).filter(name => !imageLayoutStyles.has(name))
                     .sort().map(name => [name, node.style.getPropertyValue(name), node.style.getPropertyPriority(name)]);
                 flushText();
@@ -755,6 +761,28 @@
         flushText();
         return parts;
     }
+    function completeChoiceReceipt(saved, options, echo, requireContent = false) {
+        if (saved.kind !== 'choice' || echo !== true || options.length !== saved.definition.options.length
+            || new Set(options.map(option => String(option.id))).size !== options.length) return false;
+        return options.every(option => {
+            const key = saved.optionIds?.[String(option.id)];
+            if (!key) return false;
+            const content = option.content;
+            if (typeof content === 'string' && content.trim()) return optionKey(content) === key;
+            return !requireContent && (content == null || typeof content === 'string');
+        });
+    }
+    function sameStemAroundExport(original, preview) {
+        const exported = part => Array.isArray(part) && !part[1] && !part[2].length
+            && part[0].startsWith(`https://${formulaExportHost}/paper/dev/`)
+            && /^\d{8}\/[\da-f-]{36}\.png$/i.test(part[0].split('/paper/dev/')[1]);
+        const slot = original.findIndex(exported);
+        if (slot < 0 || !exported(preview[slot]) || original.length !== preview.length
+            || original.filter(exported).length !== 1 || preview.filter(exported).length !== 1
+            || !original.some(part => Array.isArray(part) && part[0].startsWith('https://image.zhihuishu.com/zhs/question-import/formula/')))
+            return false;
+        return original.every((part, index) => index === slot || JSON.stringify(part) === JSON.stringify(preview[index]));
+    }
     function contentMismatch(item, saved, options, echo) {
         if (typeof item.content !== 'string'
             || item.content.normalize('NFC').replace(/\r\n/g, '\n') === saved.definition.content) return '';
@@ -764,14 +792,14 @@
         // An empty preview can be linked through the complete original option
         // set and the exact submitted answer. A different stem is never linked this way.
         if (!preview.length) {
-            const ids = saved.optionIds ?? {};
-            const returned = new Set(options.map(option => String(option.id)));
-            if (saved.kind === 'choice' && echo === true && returned.size === options.length
-                && returned.size === saved.definition.options.length
-                && options.every(option => Object.hasOwn(ids, String(option.id))
-                    && (option.content == null || typeof option.content === 'string'
-                        && (!option.content.trim() || optionKey(option.content) === ids[String(option.id)])))) return '';
-            return 'question-content-empty';
+            return completeChoiceReceipt(saved, options, echo) ? '' : 'question-content-empty';
+        }
+        // In the mixed stem, the inline exported PNG and the platform diagram
+        // are distinct assets. Allow a reissued export only for this sealed
+        // submission, with every original option and the exact answer echo.
+        if (sameStemAroundExport(original, preview) && completeChoiceReceipt(saved, options, echo, true)) {
+            log('info', 'memory.formula-export-matched', { question: saved.id, count: options.length });
+            return '';
         }
         const images = parts => JSON.stringify(parts.filter(Array.isArray));
         return images(preview) !== images(original) ? 'question-content-image' : 'question-content-text';
