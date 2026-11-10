@@ -31,7 +31,7 @@
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
     const VERSION = '2.5.15';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-b4952cf7edab';
+    const BUILD = 'dev-9754f1795326';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
     const courseUrl = ({ course, cls }) =>
         `https://${LEARN_HOST}/singleCourse/knowledgeStudy/${course}/${cls}`;
@@ -920,8 +920,10 @@
     }
     function rememberHistoricalReview(memory, page, items) {
         const records = items.slice(0, 100).filter(item => isId(String(item.id)) && typeof item.content === 'string'
-            && item.content.length <= 160000 && resultVerdict([item]) !== 'unknown').map(item => ({
+            && item.content.length <= 160000 && (Array.isArray(item.optionDtos) || typeof item.result === 'string'
+                || Array.isArray(item.result))).map(item => ({
             id: String(item.id), content: item.content, questionType: item.questionType, questionTypeName: item.questionTypeName,
+            version: item.version,
             optionDtos: (Array.isArray(item.optionDtos) ? item.optionDtos : []).slice(0, 8)
                 .map(({ id, content, isCorrect }) => ({ id, content, isCorrect })),
             result: item.result
@@ -932,8 +934,9 @@
         log('info', 'memory.history-read', { count: records.length });
     }
     async function historicalAnswer(q, context) {
+        const media = hasUnseenMedia(q);
         const references = Object.values(context.memory.reviews ?? {}).flat().filter(item =>
-            (item.questionType != null && q.captured.questionType != null
+            (!(media || q.inputs) || item.id === q.id) && (item.questionType != null && q.captured.questionType != null
                 ? String(item.questionType) === String(q.captured.questionType) : item.questionTypeName === q.captured.questionTypeName));
         let stemMatches = 0;
         const matching = await Promise.all(references.map(async item => {
@@ -943,8 +946,14 @@
             if (q.inputs) return item.id === q.id ? blankReference(item, q.inputs.length) : null;
             if (item.optionDtos.length !== q.options.length) return null;
             const matched = await Promise.all(item.optionDtos.map(async option => {
+                if (typeof option.content !== 'string' || !option.content.trim()) {
+                    if (item.id !== q.id || !isId(String(option.id))) return -1;
+                    if (media && (item.version == null || String(item.version) !== String(q.captured.version))) return -1;
+                    const ids = q.captured.optionVos.flatMap((current, i) => String(current.id) === String(option.id) ? [i] : []);
+                    return ids.length === 1 ? ids[0] : -1;
+                }
                 const key = optionKey(option.content);
-                const indices = await Promise.all(q.captured.optionVos.map(async (current, i) => q.options[i] === key
+                const indices = await Promise.all(q.captured.optionVos.map(async (current, i) => !media && q.options[i] === key
                     || await sameContentParts(contentParts(option.content), contentParts(current.content))));
                 const found = indices.flatMap((ok, i) => ok ? [i] : []);
                 return found.length === 1 ? found[0] : -1;
@@ -955,7 +964,7 @@
         }));
         const kind = q.inputs ? 'blank' : 'choice';
         const candidates = matching.filter(values => values && !isKnownFailure(context, values, kind));
-        if (hasUnseenMedia(q) && references.length) log('info', 'memory.history-match', { question: q.id, total: references.length,
+        if (references.length) log('info', 'memory.history-match', { question: q.id, total: references.length,
             count: stemMatches, confirmed: candidates.length });
         return candidates.length && new Set(candidates.map(values => answerKey(values, kind))).size === 1 ? candidates[0] : null;
     }
@@ -1772,7 +1781,9 @@
         const resumed = savedRecord?.saved && savedRecord.fingerprint === context.fingerprint && savedRecord.kind === 'blank';
         const hasMedia = hasUnseenMedia(q);
         const known = resumed ? savedRecord.answers : hasMedia ? null : confirmedAnswers(context.entry);
-        const fallback = known ? null : hasMedia ? (await previousPictureEvidence(q, context)).values : await historicalAnswer(q, context);
+        const picture = known || !hasMedia ? null : (await previousPictureEvidence(q, context)).values;
+        const historical = known || picture ? null : await historicalAnswer(q, context);
+        const fallback = picture ?? historical;
         let values = fillValues(known ?? fallback, q.inputs.length);
         const verified = Boolean(values) && !resumed;
         const visual = !values && allowAI && hasMedia;
@@ -1792,7 +1803,7 @@
         await restore();
         await confirmAnswerSaved(q, before, values, restore);
         setMessage(verified ? '已复用并保存平台确认的填空答案' : '填空已保存');
-        await rememberAnswer(q, values, resumed ? 'resumed' : verified ? 'confirmed' : visual ? 'vision' : 'ai', context);
+        await rememberAnswer(q, values, resumed ? 'resumed' : historical ? 'history' : verified ? 'confirmed' : visual ? 'vision' : 'ai', context);
         return true;
     }
 
@@ -1937,9 +1948,9 @@
             const resumed = savedRecord?.saved && savedRecord.fingerprint === context.fingerprint && savedRecord.kind === 'choice';
             const hasMedia = hasUnseenMedia(q);
             const known = resumed ? savedRecord.answers : hasMedia ? null : confirmedAnswers(context.entry);
-            const historical = known || hasMedia ? null : await historicalAnswer(q, context);
             const prior = known || !hasMedia ? null : await previousPictureEvidence(q, context);
-            const cached = known ?? historical ?? prior?.values;
+            const historical = known || prior?.values ? null : await historicalAnswer(q, context);
+            const cached = known ?? prior?.values ?? historical;
             let indices = exactIndices(q.options, cached, q.multi);
             const verified = Boolean(indices) && !resumed; let trial = false;
             const visual = !indices && hasMedia;
