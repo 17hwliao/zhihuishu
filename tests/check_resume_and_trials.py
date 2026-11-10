@@ -176,7 +176,7 @@ render();fetch('/getExamSheetInfo');</script>'''
     elif case in ('blank-partial', 'blank-contradiction'):
         page.wait_for_function("JSON.parse(window.name||'{}')['mastery-task']?.paused")
         task = json.loads(page.evaluate('window.name'))['mastery-task']
-        assert task['phase'] == 'preview' and '逐空参考答案未能核对' in task['message'], task
+        assert task['phase'] == 'preview' and '参考答案未能核对' in task['message'], task
         assert task['queue'][0]['rounds'] == 1 and 'new-round' not in visits
         assert saves == ['5#@#0'] and list(map(json.loads, commits)) == [['5', '0']] and len(calls) == 1
         if case == 'blank-partial':

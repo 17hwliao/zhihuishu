@@ -64,6 +64,9 @@ assert.equal(submittedEchoMatches({kind:'choice',answers:['B'],optionIds:{10:'A'
 assert.equal(submittedEchoMatches({kind:'blank',answers:['  int X = 2;  ']},[{answer:'int X = 2;'}]),false);
 assert.equal(submittedEchoMatches({kind:'blank',answers:['  int X = 2;  ']},[{answer:'  int X = 2;  '}]),true);
 assert.equal(submittedEchoMatches({kind:'blank',answers:['x']},[{isCorrect:0}]),null);
+assert.equal(submittedEchoMatches({kind:'blank',answers:['x, y',' z ']},[{answer:['x, y',' z '],isCorrect:0}]),true);
+assert.equal(submittedEchoMatches({kind:'blank',answers:['x','y']},[{answer:['y','x'],isCorrect:0}]),false);
+assert.equal(submittedEchoMatches({kind:'choice',answers:['A','B'],optionIds:{10:'A',11:'B'}},[{answer:[11,10],isCorrect:0}]),true);
 const differentOptionSpace = memoryDefinition({content:definition.content,questionTypeName:'单选题',optionVos:[{content:'A '},{content:'B'}]},['A','B'],[]);
 assert.notDeepEqual(differentOptionSpace,definition);
 const blanks=memoryDefinition({content:'<input> + <input>',questionTypeName:'填空题'},[],[['INPUT','text',false],['INPUT','text',false]]);

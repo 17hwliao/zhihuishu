@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智慧树 · 掌握度助手
 // @namespace    local.zhihuishu.mastery
-// @version      2.5.8
+// @version      2.5.9
 // @homepageURL  https://github.com/17hwliao/zhihuishu
 // @supportURL   https://github.com/17hwliao/zhihuishu/issues
 // @updateURL    none
@@ -27,9 +27,9 @@
     'use strict';
     const LEARN_HOST = 'ai-smart-course-student-pro.zhihuishu.com';
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
-    const VERSION = '2.5.8';
+    const VERSION = '2.5.9';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-4a6ae8cd31ea';
+    const BUILD = 'dev-6d654118f745';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
     const courseUrl = ({ course, cls }) =>
         `https://${LEARN_HOST}/singleCourse/knowledgeStudy/${course}/${cls}`;
@@ -313,10 +313,11 @@
     }
     const answerKey = (answers, kind) => JSON.stringify(kind === 'choice' ? [...answers].sort() : answers);
     function submittedEchoMatches(saved, marked, optionIds = {}) {
-        const echoed = marked.filter(answer => answer.answer !== undefined && answer.answer !== null).map(answer => String(answer.answer));
+        const echoed = marked.flatMap(({ answer }) => answer == null ? [] : Array.isArray(answer) ? answer : [answer]);
         if (!echoed.length) return null;
+        if (echoed.some(value => typeof value !== 'string' && typeof value !== 'number')) return false;
         const fields = echoed.length === 1 && (saved.kind === 'choice' || saved.answers.length > 1)
-            ? echoed[0].split(saved.kind === 'choice' ? /#@#|,/ : '#@#') : echoed;
+            ? String(echoed[0]).split(saved.kind === 'choice' ? /#@#|,/ : '#@#') : echoed.map(String);
         const values = saved.kind === 'choice' ? fields.map(id => saved.optionIds?.[id] ?? optionIds[id]) : fields;
         return !values.includes(undefined) && answerKey(values, saved.kind) === answerKey(saved.answers, saved.kind);
     }
@@ -626,6 +627,19 @@
             if (fingerprintCache.size > 64) fingerprintCache.clear();
             fingerprintCache.set(canonical, fingerprint);
         }
+        if (!confirmedAnswers(memory.questions[fingerprint]) && hasUnseenMedia(q)) {
+            const visual = imageDefinitionKey(definition);
+            if (visual) {
+                const matches = [...new Set(Object.values(memory.papers).map(p => p.questions?.[q.id])
+                    .filter(saved => saved && confirmedAnswers(memory.questions[saved.fingerprint])
+                        && imageDefinitionKey(saved.definition) === visual).map(saved => saved.fingerprint))];
+                const answers = matches.map(key => answerKey(confirmedAnswers(memory.questions[key]), q.inputs ? 'blank' : 'choice'));
+                if (matches.length && new Set(answers).size === 1) {
+                    fingerprint = matches[0];
+                    log('info', 'memory.image-version-matched', { question: q.id, count: matches.length });
+                }
+            }
+        }
         return { memory, fingerprint, definition, entry: memory.questions[fingerprint] };
     }
     const isKnownFailure = (context, values, kind) => {
@@ -642,7 +656,7 @@
         const task = readTask(), memory = pointMemory(true), page = view();
         if (!memory || !scopeEqual(memory.scope, context.memory.scope)) throw Error('答案归属已变化');
         saveMemoryAnswer(memory, { id: task.paperInstance, key: page.key, round: task.queue[task.index].rounds },
-            { id: q.id, fingerprint: context.fingerprint, definition: context.definition, answers,
+            { id: q.id, fingerprint: context.fingerprint, definition: context.definition, answers, multiple: q.multi,
                 kind: q.inputs ? 'blank' : 'choice', source, savedAt: Date.now(),
                 optionIds: q.inputs ? {} : Object.fromEntries((q.captured.optionVos ?? []).map((option, i) => [String(option.id), q.options[i]])) });
         GM_setValue(MEMORY_KEY, memory);
@@ -699,6 +713,42 @@
         return JSON.stringify([norm(clone.textContent), images]);
     };
     const optionKey = html => keyOf(htmlDoc(html));
+    const hasUnseenMedia = q => Boolean(q.captured.dataFileVos?.length)
+        || [q.captured.content, ...(q.captured.optionVos ?? []).map(option => option.content)]
+            .some(html => /<(?:img|svg|math|video|iframe|object|embed)\b/i.test(html));
+    function pureImageKey(html) {
+        if (!/<img\b/i.test(html)) return null;
+        const body = htmlDoc(html), images = all('img', body);
+        if (!images.length || norm(body.textContent) || $(':not(p,div,span,img,br)', body)) return null;
+        const sources = images.map(img => {
+            const src = img.getAttribute('src')?.trim();
+            if (!src || img.hasAttribute('srcset')) return null;
+            try { return [new URL(src, location.href).href, img.getAttribute('style') ?? '']; } catch { return null; }
+        });
+        return sources.every(Boolean) ? JSON.stringify(sources) : null;
+    }
+    function imageDefinitionKey(definition) {
+        if (!Array.isArray(definition?.optionVersions)) return null;
+        const stem = pureImageKey(definition.content);
+        const images = definition.optionVersions.map(pureImageKey);
+        if (!stem && !images.some(Boolean)) return null;
+        const options = definition.optionVersions.map((html, i) => images[i] ? ['image', images[i]] : ['html', html]);
+        return JSON.stringify([stem ? ['image', stem] : ['html', definition.content], definition.type, definition.options,
+            options.map(option => JSON.stringify(option)).sort(), definition.blanks, definition.files]);
+    }
+    function choiceReference(saved, options) {
+        const correct = options.filter(option => String(option.isCorrect) === '1');
+        const keys = correct.map(option => {
+            const idKey = saved.optionIds?.[String(option.id)];
+            const hasContent = typeof option.content === 'string' && option.content.trim();
+            if (!hasContent) return idKey;
+            const key = optionKey(option.content);
+            return idKey && key !== idKey ? undefined : key;
+        });
+        const definition = saved.definition;
+        const multiple = saved.multiple ?? (saved.answers.length > 1 || String(definition.type[0]) === '2' || /多选/.test(definition.type[1]));
+        return exactIndices(definition.options, keys, multiple) ? keys.sort() : null;
+    }
     const checked = el => {
         const input = $('input[type=checkbox],input[type=radio]', el);
         if (input) return input.checked;
@@ -751,22 +801,23 @@
             const row = { id, verdict: flags === 'perfect' ? 'correct' : flags === 'wrong' ? 'wrong' : 'unknown',
                 feedback: [item.analysisDto?.analyze, item.analysis, item.questionAnalysis, item.answerAnalysis, item.explanation]
                     .filter(v => typeof v === 'string').slice(0, 2).map(textOf).join(' ').slice(0, 600), solution: null };
-            if (!saved) return row;
+            if (!saved) return { ...row, rejected: 'question-id' };
+            const options = Array.isArray(item.optionDtos) ? item.optionDtos : [];
             const echo = submittedEchoMatches(saved, item.userAnswerDtos ?? [],
-                Object.fromEntries((item.optionDtos ?? []).map(option => [String(option.id), optionKey(option.content)])));
+                Object.fromEntries(options.filter(option => typeof option.content === 'string' && option.content.trim())
+                    .map(option => [String(option.id), optionKey(option.content)])));
             row.echoVerified = echo === true;
-            row.definitionMismatch = typeof item.content === 'string'
-                && item.content.normalize('NFC').replace(/\r\n/g, '\n') !== definition.content;
-            if (echo === false) row.definitionMismatch = true;
-            if (item.questionTypeName != null && item.questionTypeName !== definition.type[1]) row.definitionMismatch = true;
-            if (saved.kind === 'choice') {
-                const solution = (item.optionDtos ?? []).filter(o => String(o.isCorrect) === '1').map(o => optionKey(o.content));
-                if (solution.length && solution.every(key => definition.options.includes(key))) row.solution = solution.sort();
-            } else {
-                const solution = blankReference(item, definition.blanks.length);
-                if (solution && (row.verdict !== 'wrong' || answerKey(solution, 'blank') !== answerKey(saved.answers, 'blank')))
-                    row.solution = solution;
-            }
+            const image = pureImageKey(item.content);
+            const type = definition.type[0];
+            if (typeof item.content === 'string' && item.content.normalize('NFC').replace(/\r\n/g, '\n') !== definition.content
+                && (!image || image !== pureImageKey(definition.content))) row.rejected = 'question-content';
+            else if (item.questionType != null && type != null ? String(item.questionType) !== String(type)
+                : item.questionTypeName != null && item.questionTypeName !== definition.type[1]) row.rejected = 'question-type';
+            else if (echo === false) row.rejected = 'submitted-answer-echo';
+            if (row.rejected) return { ...row, definitionMismatch: true };
+            const solution = saved.kind === 'choice' ? choiceReference(saved, options) : blankReference(item, definition.blanks.length);
+            if (solution && (row.verdict !== 'wrong' || answerKey(solution, saved.kind) !== answerKey(saved.answers, saved.kind)))
+                row.solution = solution;
             return row;
         });
         if (currentTask?.submissionId !== context.submissionId && Object.values(memory.papers).filter(p => p.key === context.key).length > 1
@@ -780,22 +831,27 @@
         const outcome = applyMemoryGrade(latest, context, rows, digest);
         if (!outcome.accepted) { log('warn', 'memory.result-unlinked', { reason: outcome.reason }); return; }
         GM_setValue(MEMORY_KEY, latest);
+        const reasons = rows.reduce((counts, row) => {
+            const reason = row.rejected ?? (row.verdict !== 'correct' && !row.solution ? 'missing-reference' : null);
+            if (reason) counts.set(reason, (counts.get(reason) ?? 0) + 1);
+            return counts;
+        }, new Map());
         log('info', 'memory.graded', { verdict: outcome.verdict, duplicate: Boolean(outcome.duplicate), conflicts: outcome.conflicts ?? 0,
-            blankReferences: rows.filter(row => row.solution && !row.definitionMismatch && submission.questions[row.id]?.kind === 'blank').length });
+            count: rows.filter(row => row.solution).length, total: rows.length, build: BUILD,
+            reason: [...reasons].map(([reason, count]) => `${reason}=${count}`).join(',') });
         if (readTask()?.submissionId === context.submissionId && view().key === page.key) {
             const graded = latest.papers[context.submissionId];
-            const blockedBlanks = Object.values(graded.questions).filter(saved => {
-                if (saved.kind !== 'blank') return false;
+            const blocked = Object.values(graded.questions).filter(saved => {
                 const result = graded.feedback[saved.id];
-                if (!result || result.verdict === 'unknown') return true;
+                if (!result || rows.some(row => row.id === saved.id && row.rejected)) return true;
                 if (result.verdict === 'correct') return false;
-                const solution = result.solution && latest.questions[saved.fingerprint]?.answers[answerKey(result.solution, 'blank')];
+                const solution = result.solution && latest.questions[saved.fingerprint]?.answers[answerKey(result.solution, saved.kind)];
                 return !solution || answerState(solution) !== 'correct';
             }).length;
             grade = { at: location.href, key: page.key, submissionId: context.submissionId, verdict: outcome.verdict, count: items.length,
-                blockedBlanks, conflicts: outcome.conflicts ?? 0 };
-            if (!outcome.duplicate && !blockedBlanks && !grade.conflicts) setMessage(outcome.verdict === 'perfect' ? '本轮平台判定全对' : outcome.verdict === 'wrong'
-                ? '本轮有错题，已按对应提交记录纠错' : '判分证据尚不完整，等待平台确认');
+                blocked, conflicts: outcome.conflicts ?? 0 };
+            if (!outcome.duplicate && !blocked && !grade.conflicts) setMessage(outcome.verdict === 'perfect' ? '本轮平台判定全对' : outcome.verdict === 'wrong'
+                ? '本轮有错题，已按对应提交记录纠错' : '已读取可复用的参考答案，正在核对掌握度');
         }
     }
 
@@ -1160,7 +1216,7 @@
         const title = $(`${TITLE},.centent-pre .preStyle,.question-title`, root);
         const stem = textOf(captured.content);
         if (!title || (stem && norm(title.textContent) !== stem)) return null;
-        if (!stem && keyOf(title) !== optionKey(captured.content)) return null;
+        if ((!stem || /<img\b/i.test(captured.content)) && keyOf(title) !== optionKey(captured.content)) return null;
         const inputs = findVisible('input:not([type=hidden]):not([type=radio]):not([type=checkbox]), textarea, [contenteditable="true"]', root)
             .filter(el => !el.disabled && !el.readOnly);
         if (inputs.length && (/填空|简答|问答/.test(captured.questionTypeName ?? '') || !captured.optionVos?.length))
@@ -1322,7 +1378,7 @@
         const verified = Boolean(values) && !resumed;
         if (!values && allowAI) {
             try {
-                if (!q.stem || /<(img|video|iframe|object|embed)\b/i.test(q.captured.content) || q.captured.dataFileVos?.length)
+                if (!q.stem || hasUnseenMedia(q))
                     throw unavailableAnswer('暂未确认图片填空的答案');
                 values = await askAI(q, context, key);
             } catch (error) {
@@ -1446,11 +1502,11 @@
             const cached = resumed ? savedRecord.answers : confirmedAnswers(context.entry);
             let indices = exactIndices(q.options, cached, q.multi);
             const verified = Boolean(indices) && !resumed; let trial = false;
+            if (!indices && hasUnseenMedia(q)) throw unavailableAnswer('图题缺少可核对的参考答案，已保留原卷并暂停');
             if (!indices && allowAI) {
                 const options = (q.captured.optionVos ?? []).map(o => textOf(o.content));
                 try {
-                    if (!q.stem || options.some(option => !option) || /<(img|video|iframe|object|embed)\b/i.test(q.captured.content)
-                        || q.captured.dataFileVos?.length || q.options.some(option => JSON.parse(option)[1].length))
+                    if (!q.stem || options.some(option => !option))
                         throw unavailableAnswer('图题或混合选项没有已验证的精确答案');
                     setMessage('AI 正在分析这一题…');
                     indices = await askAI(q, context, key);
@@ -1501,7 +1557,7 @@
                 const retained = pointMemory()?.papers[readTask()?.paperInstance]?.questions[q.id];
                 const context = await questionMemory(q);
                 const resumed = seen.has(q.id) && retained?.saved && retained.fingerprint === context.fingerprint
-                    && !(q.inputs && retained.source === 'trial')
+                    && !(retained.source === 'trial' && (q.inputs || hasUnseenMedia(q)))
                     && !isKnownFailure(context, retained.answers, retained.kind);
                 const visibleAnswers = q.inputs ? q.inputs.map(el => el.isContentEditable ? el.textContent : el.value)
                     : q.nodes.flatMap((el, i) => checked(el) ? [q.dom[i]] : []);
@@ -2085,7 +2141,7 @@
         if (resumeUrl) {
             clearQuestions(); sheet = paper = grade = null;
             location.assign(resumeUrl);
-        } else if (destination.phase === 'preview' && (!grade || grade.blockedBlanks || grade.conflicts)) {
+        } else if (destination.phase === 'preview' && (!grade || grade.blocked || grade.conflicts)) {
             location.reload();
         }
     }
@@ -2309,9 +2365,9 @@
                     || (!grade.unlinked && grade.submissionId !== task.submissionId)) { waitFor('official-result-missing'); return; }
                 if (grade.count !== task.count) throw Error('解析题数与本次作答题数不一致');
                 if (grade.conflicts) throw Error('同一试卷的判分记录有冲突，已暂停自动重试');
-                if (grade.blockedBlanks) {
-                    log('warn', 'answer.blank-reference-unavailable', { count: grade.blockedBlanks, round: current.rounds });
-                    pauseTask(`${grade.blockedBlanks} 道填空的判分或逐空参考答案未能核对，已保留解析页并暂停开新卷`);
+                if (grade.blocked) {
+                    log('warn', 'answer.reference-unavailable', { count: grade.blocked, round: current.rounds });
+                    pauseTask(`${grade.blocked} 道题的判分或参考答案未能核对，已保留解析页并暂停开新卷`);
                     return;
                 }
                 taskNavigate(task, { phase: 'verify', message: '重新读取平台最高掌握度' },
