@@ -32,7 +32,7 @@
 
 如果浏览器显示源码或下载文件，可在原同名油猴脚本的编辑器中替换全文并保存，或者在 Tampermonkey 中导入下载的 `.user.js` 文件。更新时只保留一份启用的同名脚本。
 
-日常使用只需要油猴脚本，**无需 Python、参考项目或本机日志服务**。浏览器集成测试使用 Microsoft Edge；其他浏览器及脚本管理器的实际兼容性需以运行结果为准。
+日常使用只需要油猴脚本，**无需 Python 或本机日志服务**。浏览器集成测试使用 Microsoft Edge；其他浏览器及脚本管理器的实际兼容性需以运行结果为准。
 
 ## 配置 DeepSeek 或中转 API
 
@@ -119,6 +119,6 @@ node tests/test_point_memory.cjs
 
 **Zhihuishu Mastery Userscript** is a Tampermonkey script for knowledge-point mastery practice in Zhihuishu AI courses. Development version v2.5.17 adds image-question matching and optional vision input, deferred questions, history-page recovery, and GitHub release checks. It uses native answer saving and resumes the original paper. Stable downloads and development source are versioned separately.
 
-## 来源与许可
+## 许可
 
-本项目以 [MIT License](LICENSE) 提供。早期实现参考 [Cetirzine/zhihuishu-auto-mastery](https://github.com/Cetirzine/zhihuishu-auto-mastery) 的页面字段及解析流程，保留相关许可；当前油猴脚本独立运行，不依赖该 Python 项目。其他参考与适配差异见[实现说明](https://github.com/17hwliao/zhihuishu/blob/main/docs/implementation.md#参考项目的取舍)。
+本项目以 [MIT License](LICENSE) 提供。
