@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智慧树 · 掌握度助手
 // @namespace    local.zhihuishu.mastery
-// @version      2.5.9
+// @version      2.5.10
 // @homepageURL  https://github.com/17hwliao/zhihuishu
 // @supportURL   https://github.com/17hwliao/zhihuishu/issues
 // @updateURL    none
@@ -27,9 +27,9 @@
     'use strict';
     const LEARN_HOST = 'ai-smart-course-student-pro.zhihuishu.com';
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
-    const VERSION = '2.5.9';
+    const VERSION = '2.5.10';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-6d654118f745';
+    const BUILD = 'dev-8c75ecc30fa6';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
     const courseUrl = ({ course, cls }) =>
         `https://${LEARN_HOST}/singleCourse/knowledgeStudy/${course}/${cls}`;
@@ -716,22 +716,74 @@
     const hasUnseenMedia = q => Boolean(q.captured.dataFileVos?.length)
         || [q.captured.content, ...(q.captured.optionVos ?? []).map(option => option.content)]
             .some(html => /<(?:img|svg|math|video|iframe|object|embed)\b/i.test(html));
-    function pureImageKey(html) {
-        if (!/<img\b/i.test(html)) return null;
-        const body = htmlDoc(html), images = all('img', body);
-        if (!images.length || norm(body.textContent) || $(':not(p,div,span,img,br)', body)) return null;
-        const sources = images.map(img => {
-            const src = img.getAttribute('src')?.trim();
-            if (!src || img.hasAttribute('srcset')) return null;
-            try { return [new URL(src, location.href).href, img.getAttribute('style') ?? '']; } catch { return null; }
-        });
-        return sources.every(Boolean) ? JSON.stringify(sources) : null;
+    const imageLayoutStyles = new Set(['width', 'height', 'min-width', 'min-height', 'max-width', 'max-height', 'vertical-align']);
+    function contentParts(html) {
+        if (typeof html !== 'string') return null;
+        const body = htmlDoc(html);
+        // Limit the comparison to ordinary display markup. Code, math, tables and
+        // embedded media still require the original content to match exactly.
+        if ($(':not(p,div,span,img,br,b,strong,i,em,u,font,figure,figcaption)', body)) return null;
+        const parts = [];
+        let text = '';
+        const flushText = () => {
+            // The platform's preview also renders full-width blank underscores as ASCII.
+            const value = norm(text).replace(/＿/g, '_');
+            if (value) parts.push(value);
+            text = '';
+        };
+        function walk(node) {
+            if (node.nodeType === 3) { text += node.nodeValue; return true; }
+            if (node.nodeType !== 1) return true;
+            if (node.tagName === 'IMG') {
+                const src = node.getAttribute('src')?.trim();
+                if (!src) return false;
+                let url;
+                try { url = new URL(src, location.href).href; } catch { return false; }
+                const styles = Array.from(node.style).filter(name => !imageLayoutStyles.has(name))
+                    .sort().map(name => [name, node.style.getPropertyValue(name), node.style.getPropertyPriority(name)]);
+                flushText();
+                parts.push([url, node.getAttribute('srcset') ?? '', styles]);
+                return true;
+            }
+            const block = /^(P|DIV|BR|FIGURE|FIGCAPTION)$/.test(node.tagName);
+            if (block) text += ' ';
+            const valid = Array.from(node.childNodes).every(walk);
+            if (block) text += ' ';
+            return valid;
+        }
+        if (!Array.from(body.childNodes).every(walk)) return null;
+        flushText();
+        return parts;
+    }
+    function contentMismatch(item, saved, options, echo) {
+        if (typeof item.content !== 'string'
+            || item.content.normalize('NFC').replace(/\r\n/g, '\n') === saved.definition.content) return '';
+        const preview = contentParts(item.content), original = contentParts(saved.definition.content);
+        if (!preview || !original) return 'question-content-markup';
+        if (JSON.stringify(preview) === JSON.stringify(original)) return '';
+        // An empty preview can be linked through the complete original option
+        // set and the exact submitted answer. A different stem is never linked this way.
+        if (!preview.length) {
+            const ids = saved.optionIds ?? {};
+            const returned = new Set(options.map(option => String(option.id)));
+            if (saved.kind === 'choice' && echo === true && returned.size === options.length
+                && returned.size === saved.definition.options.length
+                && options.every(option => Object.hasOwn(ids, String(option.id))
+                    && (option.content == null || typeof option.content === 'string'
+                        && (!option.content.trim() || optionKey(option.content) === ids[String(option.id)])))) return '';
+            return 'question-content-empty';
+        }
+        const images = parts => JSON.stringify(parts.filter(Array.isArray));
+        return images(preview) !== images(original) ? 'question-content-image' : 'question-content-text';
     }
     function imageDefinitionKey(definition) {
         if (!Array.isArray(definition?.optionVersions)) return null;
-        const stem = pureImageKey(definition.content);
-        const images = definition.optionVersions.map(pureImageKey);
-        if (!stem && !images.some(Boolean)) return null;
+        const stem = contentParts(definition.content);
+        const images = definition.optionVersions.map(html => {
+            const parts = contentParts(html);
+            return parts?.some(Array.isArray) ? parts : null;
+        });
+        if (!stem?.some(Array.isArray) && !images.some(Boolean)) return null;
         const options = definition.optionVersions.map((html, i) => images[i] ? ['image', images[i]] : ['html', html]);
         return JSON.stringify([stem ? ['image', stem] : ['html', definition.content], definition.type, definition.options,
             options.map(option => JSON.stringify(option)).sort(), definition.blanks, definition.files]);
@@ -807,13 +859,11 @@
                 Object.fromEntries(options.filter(option => typeof option.content === 'string' && option.content.trim())
                     .map(option => [String(option.id), optionKey(option.content)])));
             row.echoVerified = echo === true;
-            const image = pureImageKey(item.content);
             const type = definition.type[0];
-            if (typeof item.content === 'string' && item.content.normalize('NFC').replace(/\r\n/g, '\n') !== definition.content
-                && (!image || image !== pureImageKey(definition.content))) row.rejected = 'question-content';
-            else if (item.questionType != null && type != null ? String(item.questionType) !== String(type)
+            if (item.questionType != null && type != null ? String(item.questionType) !== String(type)
                 : item.questionTypeName != null && item.questionTypeName !== definition.type[1]) row.rejected = 'question-type';
             else if (echo === false) row.rejected = 'submitted-answer-echo';
+            else row.rejected = contentMismatch(item, saved, options, echo);
             if (row.rejected) return { ...row, definitionMismatch: true };
             const solution = saved.kind === 'choice' ? choiceReference(saved, options) : blankReference(item, definition.blanks.length);
             if (solution && (row.verdict !== 'wrong' || answerKey(solution, saved.kind) !== answerKey(saved.answers, saved.kind)))
@@ -832,7 +882,7 @@
         if (!outcome.accepted) { log('warn', 'memory.result-unlinked', { reason: outcome.reason }); return; }
         GM_setValue(MEMORY_KEY, latest);
         const reasons = rows.reduce((counts, row) => {
-            const reason = row.rejected ?? (row.verdict !== 'correct' && !row.solution ? 'missing-reference' : null);
+            const reason = row.rejected || (row.verdict !== 'correct' && !row.solution ? 'missing-reference' : null);
             if (reason) counts.set(reason, (counts.get(reason) ?? 0) + 1);
             return counts;
         }, new Map());
