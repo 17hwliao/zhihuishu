@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智慧树 · 掌握度助手
 // @namespace    local.zhihuishu.mastery
-// @version      2.5.16
+// @version      2.5.17
 // @homepageURL  https://github.com/17hwliao/zhihuishu
 // @supportURL   https://github.com/17hwliao/zhihuishu/issues
 // @updateURL    none
@@ -31,9 +31,9 @@
     'use strict';
     const LEARN_HOST = 'ai-smart-course-student-pro.zhihuishu.com';
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
-    const VERSION = '2.5.16';
+    const VERSION = '2.5.17';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-c218c73e70b5';
+    const BUILD = 'dev-07a792c3eb34';
     const RELEASES = 'https://github.com/17hwliao/zhihuishu/releases';
     const RELEASE_API = 'https://api.github.com/repos/17hwliao/zhihuishu/releases/latest';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
@@ -1000,6 +1000,20 @@
         message = text; if (status) renderStatus();
     };
 
+    function captureMastery(at, value, source, count = null) {
+        // The history page displays an explicitly empty maximum as 0%.
+        const empty = source === 'mastery-history' && (value === null || value === '');
+        const numeric = ['number', 'string'].includes(typeof value) && /^\d+(?:\.\d+)?$/.test(String(value).trim());
+        const score = empty ? 0 : numeric ? Number(value) : null;
+        const high = score !== null && score >= 0 && score <= 100 ? score : null;
+        const status = high === null ? (value === undefined ? 'missing' : 'invalid') : empty ? 'empty-as-zero' : 'numeric';
+        const retained = paper?.at === at && paper.high !== null
+            && (high === null || (paper.source === 'mastery-history' && source !== paper.source)
+                || (empty && paper.status === 'numeric' && paper.source === source));
+        if (!retained) paper = { at, high, source, status };
+        log(high === null ? 'warn' : 'info', 'mastery.captured', { source, status, result: high, count });
+    }
+
     async function officialResult(payload, page, context) {
         const items = payload?.aiExamQuestionInfo ?? payload?.data?.aiExamQuestionInfo;
         if (!Array.isArray(items) || !items.length || !context) return;
@@ -1118,13 +1132,11 @@
         else if (page.kind === 'course' && path.endsWith('/list-knowledge-theme') && Array.isArray(data?.courseThemeList))
             { catalog = { at, data }; log('info', 'catalog.captured', { themes: data.courseThemeList.length }); }
         else if (page.kind === 'history' && path.endsWith('/mastery-statistics/get-node-master-max')
-            && [200, '200', 0, '0'].includes(payload?.code) && data && Object.hasOwn(data, 'masteryMax')) {
-            paper = { at, high: data.masteryMax, count: null, source: 'mastery-history' };
-            log('info', 'mastery.captured', { source: 'mastery-history', status: 'received' });
+            && [200, '200', 0, '0'].includes(payload?.code)) {
+            captureMastery(at, data?.masteryMax, 'mastery-history');
         }
         else if (['learn', 'history'].includes(page.kind) && /\/stu\/exam\/questions-paper$/.test(path) && data)
-            { paper = { at, high: data.highMasteryScore, count: Number(data.questionNum) };
-                log('info', 'mastery.captured', { high: paper.high, count: paper.count }); }
+            captureMastery(at, data.highMasteryScore, 'questions-paper', Number(data.questionNum));
         else if (page.kind === 'exam' && /\/answer\/saveAnswer$/.test(path)) {
             const accepted = payload?.success !== false && payload?.data === true
                 && ([0, 200, '0', '200', '000000'].includes(payload?.code) || payload?.code == null && payload?.success === true);
@@ -2174,9 +2186,11 @@
         return null;
     }
 
+    const observedMastery = () => paper?.at === location.href ? paper.high : null;
+
     function mastery() {
-        if (paper?.at === location.href && paper.high != null && /^\d+(?:\.\d+)?$/.test(String(paper.high)))
-            return Number(paper.high);
+        const observed = observedMastery();
+        if (observed !== null) return observed;
         const value = norm($('.simplified-mastery__percent')?.textContent);
         const m = value.match(/^(\d+(?:\.\d+)?)\s*%$/);
         return m ? Number(m[1]) : null;
@@ -2754,6 +2768,10 @@
         if (resumeUrl && !((candidate || options.skipQuestion) && resumeUrl === location.href)) {
             clearQuestions(); sheet = paper = grade = null;
             location.assign(resumeUrl);
+        } else if (page.kind === 'history' && ['learn', 'verify'].includes(destination.phase) && observedMastery() === null) {
+            log('info', 'mastery.reload-on-resume', { status: paper?.at === location.href ? paper.status : 'not-observed' });
+            flushLogs();
+            location.reload();
         } else if (destination.phase === 'preview' && (!grade || grade.blocked || grade.conflicts)) {
             location.reload();
         }
@@ -2919,7 +2937,11 @@
                 taskNavigate(task, { message: '直接进入掌握度提升页' }, masteryUrl({ ...task, point: point.point, name: point.name }));
                 return;
             }
-            if (Date.now() > task.expires) throw Error('等待平台响应超时，请检查页面后继续任务');
+            if (Date.now() > task.expires) {
+                if (page.kind === 'history' && ['learn', 'verify'].includes(task.phase) && observedMastery() === null)
+                    throw Error('未收到可用的最高掌握度，已暂停。继续任务会重新加载当前历史页。');
+                throw Error('等待平台响应超时，请检查页面后继续任务');
+            }
             if (task.phase === 'catalog') {
                 const plan = scanCatalog();
                 if (!plan) { waitFor('catalog-response-missing', { selectors: selectorCounts() }); return; }
@@ -2946,11 +2968,13 @@
             }
             const current = task.queue[task.index];
             if (['learn', 'verify'].includes(task.phase)) {
-                if (paper?.at !== location.href || mastery() === null) {
-                    waitFor('mastery-response-missing', { capturedPaper: Boolean(paper), displayedMastery: mastery() }); return;
+                const high = observedMastery();
+                if (high === null) {
+                    const observation = paper?.at === location.href ? paper : null;
+                    waitFor(observation?.status === 'invalid' ? 'mastery-response-invalid' : 'mastery-response-missing',
+                        { status: observation?.status ?? 'not-observed', source: observation?.source });
+                    return;
                 }
-                const high = mastery();
-                if (!Number.isFinite(high) || high < 0 || high > 100) throw Error('平台掌握度数据异常');
                 const queue = task.queue.map((point, i) => i === task.index ? { ...point, high } : point);
                 task = updateTask(task, { queue });
                 if (!task) return;
