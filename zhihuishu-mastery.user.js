@@ -31,7 +31,7 @@
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
     const VERSION = '2.5.15';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-396bf0eef8c0';
+    const BUILD = 'dev-b4952cf7edab';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
     const courseUrl = ({ course, cls }) =>
         `https://${LEARN_HOST}/singleCourse/knowledgeStudy/${course}/${cls}`;
@@ -1635,8 +1635,9 @@
         return ids.length === expected.length && new Set(ids).size === ids.length && ids.every(id => expected.includes(id));
     }
 
-    async function confirmAnswerSaved(q, before, expected) {
+    async function confirmAnswerSaved(q, before, expected, restore) {
         const current = () => !operationCancelled() && currentQuestion()?.signature === q.signature;
+        const settledCapture = currentQuestion()?.captured;
         const receiptAfter = () => {
             const entry = saveReceipts.get(q.id);
             const latest = latestSaveRequests.get(q.id);
@@ -1647,6 +1648,12 @@
         const autoDeadline = Date.now() + 350;
         while (current() && !receiptAfter() && Date.now() < autoDeadline) await pause(80);
         if (!current()) throw Error('题目已变化或操作已取消');
+        if (restore && currentQuestion()?.captured !== settledCapture && !visibleAnswerMatches(q, expected)) {
+            log('info', 'answer.restore-after-reload', { question: q.id });
+            await restore();
+        }
+        if (!current()) throw Error('题目已变化或操作已取消');
+        if (!visibleAnswerMatches(q, expected)) throw Error('保存前页面选填值已变化，已暂停');
         if (receiptAfter()) return;
         let owner = nativeAnswerOwner(q);
         if (owner) {
@@ -1781,8 +1788,9 @@
         }
         if (!values) throw Error('填空答案无法对应到全部空位');
         const before = saveRequestSequence;
-        await settleBlanks(q, values);
-        await confirmAnswerSaved(q, before, values);
+        const restore = () => settleBlanks(q, values);
+        await restore();
+        await confirmAnswerSaved(q, before, values, restore);
         setMessage(verified ? '已复用并保存平台确认的填空答案' : '填空已保存');
         await rememberAnswer(q, values, resumed ? 'resumed' : verified ? 'confirmed' : visual ? 'vision' : 'ai', context);
         return true;
@@ -1876,7 +1884,7 @@
             error.recoverable = 'selection-state';
             throw error;
         };
-        while (Date.now() < deadline && actions <= q.options.length * 3) {
+        while (Date.now() < deadline) {
             const fresh = current();
             const mismatches = fresh.nodes.map((node, i) => ({ key: fresh.dom[i], node,
                 wanted: expected.has(fresh.dom[i]), selected: checked(node) })).filter(item => item.wanted !== item.selected);
@@ -1889,6 +1897,7 @@
                 await pause(80); continue;
             }
             stableSince = 0;
+            if (actions >= q.options.length * 3) break;
             // Clear extra checkboxes first. A radio selection clears the previous choice through its native handler.
             const action = q.multi ? mismatches.find(item => !item.wanted) ?? mismatches[0]
                 : mismatches.find(item => item.wanted);
@@ -1909,7 +1918,7 @@
                 if (index >= 0 && checked(incoming.nodes[index]) === action.wanted) { matched = true; break; }
                 await pause(80);
             }
-            if (!matched) return fail('option-did-not-update');
+            if (!matched && current().captured === fresh.captured) return fail('option-did-not-update');
         }
         return fail('selection-did-not-settle');
     }
@@ -1967,7 +1976,8 @@
             }
             const before = saveRequestSequence;
             const changed = await settleSelection(q, indices);
-            if (fromBatch && (!resumed || changed)) await confirmAnswerSaved(q, before, indices.map(i => String(q.captured.optionVos[i].id ?? '')));
+            if (fromBatch && (!resumed || changed)) await confirmAnswerSaved(q, before, indices.map(i => String(q.captured.optionVos[i].id ?? '')),
+                () => settleSelection(q, indices));
             if (!resumed || changed) await rememberAnswer(q, indices.map(i => q.options[i]),
                 resumed ? 'resumed' : trial ? (visual ? 'vision-trial' : 'trial')
                     : historical ? 'history' : verified ? 'confirmed' : visual ? 'vision' : 'ai', context);

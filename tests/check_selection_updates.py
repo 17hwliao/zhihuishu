@@ -49,12 +49,13 @@ function render(){
    input.onchange=()=>{
      if(mode==='delayed'||mode==='never_applies')return;
      input.checked?selected.add(input.value):selected.delete(input.value);update();
-     if(mode==='replace_reset'&&!resetScheduled){
+     if((mode==='replace_reset'||mode==='duplicate_before_save')&&!resetScheduled){
        resetScheduled=true;
        setTimeout(()=>{
          root.querySelectorAll('input').forEach(node=>node.checked=false);
          selected=new Set();render();update();
-       },250);
+         if(mode==='duplicate_before_save')fetch('/gateway/t/v1/question/getExamQuestionInfo');
+       },mode==='duplicate_before_save'?525:250);
      }
    };
  });
@@ -68,7 +69,7 @@ fetch('/gateway/t/v1/question/getExamQuestionInfo');fetch('/gateway/t/v1/exam/us
 
 with sync_playwright() as p:
     browser=p.chromium.launch(channel='msedge',headless=True)
-    for case in ('replace_reset','delayed','stale_class','recovers','legacy_pause','never_applies'):
+    for case in ('replace_reset','duplicate_before_save','delayed','stale_class','recovers','legacy_pause','never_applies'):
         saves,submits,errors=[],[],[]
         seed={'mastery-ai':{'key':'fixture-only','model':'deepseek-flash','localLogs':False},
               'mastery-task':{'id':'selection-update','course':COURSE,'cls':CLS,'active':True,'paused':False,'phase':'exam',
