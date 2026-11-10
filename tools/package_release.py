@@ -20,9 +20,14 @@ def build():
     source = raw.decode('utf-8')
     release = re.search(r"const RELEASE_VERSION = '(\d+\.\d+\.\d+)'", source)[1]
     version = re.search(r"const VERSION = '(\d+\.\d+\.\d+)'", source)[1]
-    assert re.search(r'^// @version\s+(\S+)', source, re.M)[1] == version
-    for field in ('updateURL', 'downloadURL'):
-        assert re.search(r'^// @' + field + r'\s+(\S+)', source, re.M)[1] == LATEST
+    assert re.search(r'^// @version\s+(\S+)', source, re.M)[1] == version == release, 'Release tag must match the installed script version'
+    update_url = re.search(r'^// @updateURL\s+(\S+)', source, re.M)[1]
+    download_url = re.search(r'^// @downloadURL\s+(\S+)', source, re.M)
+    assert update_url in ('none', LATEST)
+    if download_url is None:
+        assert update_url == 'none'
+    else:
+        assert download_url[1] == LATEST
     normalized, count = re.subn(r"const BUILD = '[\w-]+';", "const BUILD = 'dev-unstamped';", source)
     assert count == 1
     identity = 'v' + release.replace('.', '-') + '-' + digest(normalized.encode())[:12]

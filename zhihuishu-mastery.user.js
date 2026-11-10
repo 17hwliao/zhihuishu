@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智慧树 · 掌握度助手
 // @namespace    local.zhihuishu.mastery
-// @version      2.5.15
+// @version      2.5.16
 // @homepageURL  https://github.com/17hwliao/zhihuishu
 // @supportURL   https://github.com/17hwliao/zhihuishu/issues
 // @updateURL    none
@@ -19,6 +19,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_info
 // @connect      api.deepseek.com
+// @connect      api.github.com
+// @connect      github.com
 // @connect      127.0.0.1
 // @connect      image.zhihuishu.com
 // @connect      hike-export.oss-cn-hangzhou.aliyuncs.com
@@ -29,9 +31,11 @@
     'use strict';
     const LEARN_HOST = 'ai-smart-course-student-pro.zhihuishu.com';
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
-    const VERSION = '2.5.15';
+    const VERSION = '2.5.16';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-17f82e5e3672';
+    const BUILD = 'dev-c218c73e70b5';
+    const RELEASES = 'https://github.com/17hwliao/zhihuishu/releases';
+    const RELEASE_API = 'https://api.github.com/repos/17hwliao/zhihuishu/releases/latest';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
     const courseUrl = ({ course, cls }) =>
         `https://${LEARN_HOST}/singleCourse/knowledgeStudy/${course}/${cls}`;
@@ -1537,6 +1541,86 @@
             setMessage(`连接成功：所选接口接受了 Key 和 ${settings.model}。可点击“继续任务”接续当前练习。`);
         } catch (error) { setMessage(error.message); }
         finally { testingAPI = false; renderStatus(); }
+    }
+
+    let checkingRelease = false;
+    const releaseVersion = tag => /^v(\d{1,6}\.\d{1,6}\.\d{1,6})$/.exec(tag ?? '')?.[1];
+    const releaseAsset = tag => `${RELEASES}/download/${tag}/zhihuishu-mastery.user.js`;
+
+    function githubGet(url, accept) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({ method: 'GET', url, anonymous: true, timeout: 10000,
+                headers: { Accept: accept }, onload: resolve,
+                onerror: () => reject(Error('连接 GitHub 失败')), ontimeout: () => reject(Error('检查 GitHub 超时')),
+                onabort: () => reject(Error('GitHub 检查已取消')) });
+        });
+    }
+
+    async function latestGitHubRelease() {
+        const response = await githubGet(RELEASE_API, 'application/vnd.github+json');
+        if (response.finalUrl && response.finalUrl !== RELEASE_API) throw Error('GitHub 返回了意外的地址');
+        if ([403, 429].includes(response.status)) {
+            // Anonymous API calls share an IP quota. GitHub's public stable
+            // release page and attachment list are available without API access.
+            const latest = await githubGet(`${RELEASES}/latest`, 'text/html');
+            const prefix = `${RELEASES}/tag/`;
+            const tag = latest.finalUrl?.startsWith(prefix) ? latest.finalUrl.slice(prefix.length) : null;
+            if (latest.status !== 200 || !releaseVersion(tag)) throw Error(`GitHub 检查失败（HTTP ${response.status}）`);
+            const url = `${RELEASES}/expanded_assets/${tag}`, asset = releaseAsset(tag);
+            const assets = await githubGet(url, 'text/html');
+            if (assets.status !== 200 || (assets.finalUrl && assets.finalUrl !== url)
+                || !all('a[href]', htmlDoc(assets.responseText)).some(a => {
+                    const href = a.getAttribute('href');
+                    return href === asset || href === new URL(asset).pathname;
+                })) throw Error('GitHub 稳定版缺少可安装的脚本附件');
+            return { tag, asset };
+        }
+        if (response.status !== 200) throw Error(`GitHub 检查失败（HTTP ${response.status}）`);
+        const release = JSON.parse(response.responseText), tag = release?.tag_name;
+        if (release?.draft !== false || release.prerelease !== false || !releaseVersion(tag))
+            throw Error('GitHub 未返回可识别的稳定版本');
+        const asset = releaseAsset(tag);
+        if (!Array.isArray(release.assets) || !release.assets.some(file => file?.name === 'zhihuishu-mastery.user.js'
+            && file.state === 'uploaded' && file.browser_download_url === asset))
+            throw Error('GitHub 稳定版缺少可安装的脚本附件');
+        return { tag, asset };
+    }
+
+    function renderReleaseCheck() {
+        if (!controls?.releaseStatus) return;
+        const result = GM_getValue('mastery-release-check', null);
+        const version = releaseVersion(result?.tag);
+        let order = 0;
+        if (version) {
+            const current = VERSION.split('.').map(Number);
+            order = version.split('.').map((part, i) => Number(part) - current[i]).find(diff => diff !== 0) ?? 0;
+        }
+        controls.checkRelease.disabled = checkingRelease;
+        controls.releaseStatus.textContent = checkingRelease ? '正在检查 GitHub…' : version
+            ? order > 0 ? `可更新至 v${version}` : order < 0 ? `本地 v${VERSION} 比 GitHub 稳定版 v${version} 更新` : `已是最新稳定版 v${version}`
+            : result?.error ?? '可手动检查 GitHub 稳定版';
+        const asset = version && releaseAsset(result.tag);
+        const install = controls.releaseInstall;
+        install.hidden = checkingRelease || !(order > 0 && result.asset === asset);
+        if (install.hidden) install.removeAttribute('href');
+        else install.href = asset;
+    }
+
+    async function checkGitHubRelease(manual = false) {
+        if (checkingRelease || !controls?.releaseStatus) return;
+        if (!manual && (GM_getValue('mastery-auto-release-check', false) !== true || document.hidden
+            || Date.now() - GM_getValue('mastery-release-attempt', 0) < 86400000)) return;
+        checkingRelease = true;
+        try {
+            GM_setValue('mastery-release-attempt', Date.now());
+            renderReleaseCheck();
+            GM_setValue('mastery-release-check', await latestGitHubRelease());
+        } catch (error) {
+            GM_setValue('mastery-release-check', { error: error instanceof SyntaxError ? 'GitHub 返回了无效数据' : error.message });
+        } finally {
+            checkingRelease = false;
+            renderReleaseCheck();
+        }
     }
 
     function fillValues(answers, count) {
@@ -3098,9 +3182,13 @@
                   <small>Key 按地址保存在本机，题目发送至所选接口。</small>
 
                 </details>
-                <details class="task-settings"><summary>暂缓题目</summary>
+                <details class="task-settings"><summary>跳题与脚本更新</summary>
                   <label><input name="deferUnanswered" type="checkbox">暂缓无法作答或无法稳定选填的题</label>
                   <small>继续处理原卷其他题。交卷前暂停，可继续任务重新尝试暂缓题。</small>
+                  <label><input name="autoRelease" type="checkbox">打开页面时自动检查 GitHub 更新（每天最多一次）</label>
+                  <div class="row"><button type="button" class="check-release">检查 GitHub 更新</button></div>
+                  <p class="release-status api-status" role="status"></p>
+                  <a class="release-install" target="_blank" rel="noopener noreferrer" hidden>打开新版油猴安装页</a>
                 </details>
                 <details><summary>未达标记录</summary><div class="results unresolved-results"></div></details>
                 <details class="diagnostics"><summary>运行日志与诊断</summary>
@@ -3130,9 +3218,21 @@
             controls.diagnostics = $('.diagnostics', shadow);
             controls.testAPI = $('.test-api', shadow);
             controls.apiStatus = $('.api-status', shadow);
+            controls.checkRelease = $('.check-release', shadow);
+            controls.releaseStatus = $('.release-status', shadow);
+            controls.releaseInstall = $('.release-install', shadow);
+            controls.checkRelease.onclick = () => void checkGitHubRelease(true);
             const defer = $('input[name=deferUnanswered]', shadow);
             defer.checked = GM_getValue('mastery-defer-unanswered', false) === true;
             defer.onchange = () => GM_setValue('mastery-defer-unanswered', defer.checked);
+            const autoRelease = $('input[name=autoRelease]', shadow);
+            autoRelease.checked = GM_getValue('mastery-auto-release-check', false) === true;
+            autoRelease.onchange = () => {
+                GM_setValue('mastery-auto-release-check', autoRelease.checked);
+                if (autoRelease.checked) void checkGitHubRelease();
+            };
+            renderReleaseCheck();
+            void checkGitHubRelease();
             $('.courses', shadow).hidden = page.kind !== 'hub';
             controls.guessFallback.checked = Boolean(config.guessFallback);
             controls.localLogs.checked = Boolean(config.localLogs);
@@ -3300,6 +3400,7 @@
         source: event.filename ? safeUrl(event.filename) : '', line: event.lineno }));
     addEventListener('unhandledrejection', event => log('error', 'runtime.rejection', { message: String(event.reason?.message ?? event.reason) }));
     addEventListener('pagehide', flushLogs);
+    document.addEventListener('visibilitychange', () => void checkGitHubRelease());
     addEventListener('resize', () => {
         if (!panel || panel.style.left === '') return;
         const rect = panel.getBoundingClientRect();
