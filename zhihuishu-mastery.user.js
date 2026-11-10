@@ -31,7 +31,7 @@
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
     const VERSION = '2.5.15';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-9754f1795326';
+    const BUILD = 'dev-17f82e5e3672';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
     const courseUrl = ({ course, cls }) =>
         `https://${LEARN_HOST}/singleCourse/knowledgeStudy/${course}/${cls}`;
@@ -1870,7 +1870,9 @@
         const fresh = current();
         log('warn', 'answer.blank-mismatch', { question: q.id, actions, count: values.length,
             mismatches: fresh.inputs.flatMap((el, i) => valueOf(el) !== values[i] ? [i + 1] : []), reason: 'values-not-stable' });
-        throw Error('填空值在页面更新后仍不稳定，已保留原卷并暂停');
+        const error = Error('填空值在页面更新后仍不稳定');
+        error.recoverable = 'blank-state';
+        throw error;
     }
 
     async function settleSelection(q, indices) {
@@ -2009,7 +2011,9 @@
         cancel = false;
         const initialTask = automatic ? readTask() : null;
         activeBatchId = initialTask?.id ?? null;
-        const seen = new Set(initialTask?.answered ?? []), visited = new Set();
+        const seen = new Set(initialTask?.answered ?? []), visited = new Set(), deferred = new Set();
+        const pendingSkip = initialTask?.skipQuestion?.paper === initialTask?.paperInstance ? initialTask?.skipQuestion?.id : null;
+        const deferUnavailable = automatic && GM_getValue('mastery-defer-unanswered', false) === true;
         const at = location.href;
         const moveLimit = automatic && Number.isInteger(sheet?.count) ? Math.min(200, sheet.count * 2 + 2) : 100;
         let backwards = false, moves = 0;
@@ -2017,21 +2021,39 @@
             while (!operationCancelled() && location.href === at && visited.size < 100 && moves < moveLimit) {
                 const q = currentQuestion();
                 if (!q) throw Error('未捕获到可核对的当前题目，已暂停。');
-                const retained = pointMemory()?.papers[readTask()?.paperInstance]?.questions[q.id];
-                const context = await questionMemory(q);
-                const resumed = retained?.saved && (seen.has(q.id) || retained.source === 'vision-trial') && retained.fingerprint === context.fingerprint
-                    && !(retained.source === 'trial' && (q.inputs || hasUnseenMedia(q)))
-                    && !isKnownFailure(context, retained.answers, retained.kind);
-                const visibleAnswers = q.inputs ? q.inputs.map(el => el.isContentEditable ? el.textContent : el.value)
-                    : q.nodes.flatMap((el, i) => checked(el) ? [q.dom[i]] : []);
-                if ((!resumed || answerKey(visibleAnswers, retained.kind) !== answerKey(retained.answers, retained.kind))
-                    && !await fillOne(automatic, aiConfig().key, true, resumed ? retained : null)) return null;
-                seen.add(q.id); visited.add(q.id);
+                const manualSkip = pendingSkip === q.id && !deferred.has(q.id);
+                if (manualSkip) deferred.add(q.id);
+                if (!deferred.has(q.id)) {
+                    const retained = pointMemory()?.papers[readTask()?.paperInstance]?.questions[q.id];
+                    const context = await questionMemory(q);
+                    const resumed = retained?.saved && (seen.has(q.id) || retained.source === 'vision-trial') && retained.fingerprint === context.fingerprint
+                        && !(retained.source === 'trial' && (q.inputs || hasUnseenMedia(q)))
+                        && !isKnownFailure(context, retained.answers, retained.kind);
+                    const visibleAnswers = q.inputs ? q.inputs.map(el => el.isContentEditable ? el.textContent : el.value)
+                        : q.nodes.flatMap((el, i) => checked(el) ? [q.dom[i]] : []);
+                    if ((!resumed || answerKey(visibleAnswers, retained.kind) !== answerKey(retained.answers, retained.kind))
+                        && !await fillOne(automatic, aiConfig().key, true, resumed ? retained : null)) {
+                        if (!deferUnavailable || operationCancelled() || currentQuestion()?.signature !== q.signature
+                            || currentVisionCandidate(initialTask)
+                            || !['answer-unavailable', 'vision-unavailable', 'selection-state', 'blank-state'].includes(lastAnswerFailure?.recoverable)) return null;
+                        deferred.add(q.id);
+                    }
+                }
+                if (deferred.has(q.id)) {
+                    if (!visited.has(q.id)) log('warn', 'answer.question-deferred', { question: q.id,
+                        reason: manualSkip ? 'manual' : lastAnswerFailure?.recoverable });
+                    seen.delete(q.id);
+                    lastAnswerFailure = null;
+                } else seen.add(q.id);
+                visited.add(q.id);
                 if (operationCancelled() || location.href !== at) return null;
                 if (automatic) {
-                    if (!updateTask(initialTask, { answered: [...seen] })) return null;
+                    if (!updateTask(initialTask, { answered: [...seen], ...(manualSkip ? { skipQuestion: null } : {}) })) return null;
                     log('info', 'answer.progress', { question: q.id, confirmed: seen.size, total: sheet?.count });
-                    if (sheet?.at === at && seen.size === sheet.count && visited.size === sheet.count) return seen.size;
+                    if (sheet?.at === at && visited.size === sheet.count) {
+                        if (deferred.size) throw Error(`本卷已暂缓 ${deferred.size} 道题，已保留原卷。继续任务可重新尝试这些题。`);
+                        if (seen.size === sheet.count) return seen.size;
+                    }
                 }
                 const disabled = el => el.matches(':disabled,[aria-disabled="true"],.disabled,.is-disabled,.noNext,.nopre');
                 let buttons = backwards ? [] : findVisible('.next-topic.next-t'), direction = 'next';
@@ -2429,6 +2451,20 @@
         setMessage(reason);
     }
 
+    function skippableQuestion(task = readTask()) {
+        const page = view();
+        if (!task?.paused || task.phase !== 'answering' || page?.kind !== 'exam' || !sameCourse(task, page)
+            || task.examKey !== page.key || !task.paperInstance || task.queue?.[task.index]?.point !== page.point) return null;
+        return currentQuestion();
+    }
+
+    function skipCurrentQuestion() {
+        const task = readTask(), q = skippableQuestion(task);
+        if (!q) return;
+        resumeTask({ automatic: true, skipQuestion: { id: q.id, paper: task.paperInstance } });
+        if (readTask()?.active) closePauseNotice(true);
+    }
+
     function closePauseNotice(acknowledge = false) {
         if (!pauseNotice) return;
         const notice = pauseNotice;
@@ -2451,6 +2487,9 @@
             text.hidden = !candidate;
             text.textContent = candidate ? `视觉候选：${visionCandidateText(candidate)}` : '';
             $('.manual', shadow).hidden = !candidate;
+            const skip = $('.skip', shadow);
+            skip.hidden = !skippableQuestion(task);
+            skip.disabled = resume.disabled;
         };
         if (pauseNotice?.token === token) {
             renderCandidate(pauseNotice.host.shadowRoot);
@@ -2477,7 +2516,7 @@
             <p class="reason" id="pause-reason"></p><p class="candidate" id="pause-vision-candidate" hidden></p><p class="hint" id="pause-hint"></p>
             <div class="row"><button class="resume" type="button">继续自动处理</button>
             <button class="settings" type="button">查看设置</button><button class="logs" type="button">查看日志</button>
-            <button class="manual" type="button" hidden>手动作答</button><button class="dismiss" type="button">稍后处理</button></div></dialog>`;
+            <button class="manual" type="button" hidden>手动作答</button><button class="skip" type="button" hidden>跳过当前题</button><button class="dismiss" type="button">稍后处理</button></div></dialog>`;
         const dialog = $('dialog', shadow), resume = $('.resume', shadow), point = task.queue?.[task.index];
         $('.context', shadow).textContent = `${point?.name ?? '课程任务'}${point ? ` · ${point.high}% · 第 ${point.rounds} 轮` : ''}\n已处理 ${task.index ?? 0}/${task.queue?.length ?? '待扫描'}`;
         $('.context', shadow).title = `课程 ${task.course}`;
@@ -2499,6 +2538,7 @@
         };
         $('.settings', shadow).onclick = () => openSection(controls?.settings);
         $('.logs', shadow).onclick = () => openSection(controls?.diagnostics);
+        $('.skip', shadow).onclick = skipCurrentQuestion;
         $('.manual', shadow).onclick = () => {
             visionCandidate = null;
             closePauseNotice(true);
@@ -2606,13 +2646,14 @@
         const task = readTask(), page = view();
         if (!(task?.paused || task?.active) || !page || !(options.automatic ? aiConfig() : saveSettings())) return;
         const candidate = currentVisionCandidate(task);
-        if (candidate && !options.approveVisionCandidate) { renderPauseNotice(true); return; }
+        if (candidate && !options.approveVisionCandidate && !options.skipQuestion) { renderPauseNotice(true); return; }
         if (options.approveVisionCandidate && !candidate) { setMessage('题目或接口已变化，旧候选已丢弃'); return; }
         let destination;
         try {
             destination = resumeDestination(task, page, location.href, all('a[href]').map(a => a.href));
         } catch (error) { setMessage(error.message); return; }
-        if (candidate) candidate.approved = true;
+        if (options.skipQuestion) visionCandidate = null;
+        else if (candidate) candidate.approved = true;
         cancel = false;
         setAuto({ enabled: true, status: 'running', target: { course: task.course, cls: task.cls }, taskId: task.id });
         // Keep the original course and per-point budget when resuming.
@@ -2620,12 +2661,13 @@
         const resumed = { ...task, ...resumePatch, active: true, paused: false, actor: null, lease: 0, enteredAfter: 0,
             expires: Date.now() + (['exam', 'answering'].includes(destination.phase) ? 15 * 60000 : 60000),
             answerRecovery: task.answerRecovery ? { ...task.answerRecovery, nextAt: 0 } : null,
+            skipQuestion: options.skipQuestion ?? task.skipQuestion ?? null,
             stopAfter: options.stopAfter === undefined ? task.stopAfter : options.stopAfter,
             message: '继续原课程任务' };
         writeTask(resumed);
         log('info', 'task.resumed', { phase: resumed.phase, answered: resumed.answered?.length ?? 0,
             destination: resumeUrl ? safeUrl(resumeUrl) : null });
-        if (resumeUrl && !(candidate && resumeUrl === location.href)) {
+        if (resumeUrl && !((candidate || options.skipQuestion) && resumeUrl === location.href)) {
             clearQuestions(); sheet = paper = grade = null;
             location.assign(resumeUrl);
         } else if (destination.phase === 'preview' && (!grade || grade.blocked || grade.conflicts)) {
@@ -2639,7 +2681,7 @@
         const next = task.index + 1;
         clearPointMemory(high >= 100 ? 'mastery-100' : 'point-abandoned');
         const cleared = { answered: [], examKey: null, examUrl: null, paperInstance: null, submissionId: null,
-            count: null, answerRecovery: null };
+            count: null, answerRecovery: null, skipQuestion: null };
         if (task.stopAfter && next >= task.stopAfter && next < task.queue.length) {
             updateTask(task, { ...cleared, active: false, paused: true, actor: null, results, index: next, phase: 'learn',
                 message: `本次限定验证已处理 ${next} 个点，剩余 ${task.queue.length - next} 个点保留在队列` });
@@ -3056,6 +3098,10 @@
                   <small>Key 按地址保存在本机，题目发送至所选接口。</small>
 
                 </details>
+                <details class="task-settings"><summary>暂缓题目</summary>
+                  <label><input name="deferUnanswered" type="checkbox">暂缓无法作答或无法稳定选填的题</label>
+                  <small>继续处理原卷其他题。交卷前暂停，可继续任务重新尝试暂缓题。</small>
+                </details>
                 <details><summary>未达标记录</summary><div class="results unresolved-results"></div></details>
                 <details class="diagnostics"><summary>运行日志与诊断</summary>
                   <small class="log-count" role="status"></small>
@@ -3084,6 +3130,9 @@
             controls.diagnostics = $('.diagnostics', shadow);
             controls.testAPI = $('.test-api', shadow);
             controls.apiStatus = $('.api-status', shadow);
+            const defer = $('input[name=deferUnanswered]', shadow);
+            defer.checked = GM_getValue('mastery-defer-unanswered', false) === true;
+            defer.onchange = () => GM_setValue('mastery-defer-unanswered', defer.checked);
             $('.courses', shadow).hidden = page.kind !== 'hub';
             controls.guessFallback.checked = Boolean(config.guessFallback);
             controls.localLogs.checked = Boolean(config.localLogs);

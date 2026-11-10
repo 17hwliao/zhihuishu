@@ -42,7 +42,8 @@ if __name__ == '__main__':
         panel.locator('.settings').evaluate('(n)=>n.open=false')
         before = panel.bounding_box(); grip = panel.locator('.drag-grip').bounding_box()
         page.mouse.move(grip['x']+12, grip['y']+3); page.mouse.down()
-        page.mouse.move(300, 110, steps=8); page.mouse.up()
+        # The extra settings section raises the bottom-anchored panel.
+        page.mouse.move(300, 35, steps=8); page.mouse.up()
         after = panel.bounding_box()
         assert abs(after['x']-before['x']) > 100 and abs(after['y']-before['y']) > 100
         assert 'mastery-panel-position' in json.loads(page.evaluate('window.name'))
