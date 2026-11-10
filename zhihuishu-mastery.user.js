@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智慧树 · 掌握度助手
 // @namespace    local.zhihuishu.mastery
-// @version      2.5.14
+// @version      2.5.15
 // @homepageURL  https://github.com/17hwliao/zhihuishu
 // @supportURL   https://github.com/17hwliao/zhihuishu/issues
 // @updateURL    none
@@ -29,9 +29,9 @@
     'use strict';
     const LEARN_HOST = 'ai-smart-course-student-pro.zhihuishu.com';
     const EXAM_HOST = 'studentexamcomh5.zhihuishu.com';
-    const VERSION = '2.5.14';
+    const VERSION = '2.5.15';
     const RELEASE_VERSION = '1.0.0';
-    const BUILD = 'dev-868ce94198c1';
+    const BUILD = 'dev-396bf0eef8c0';
     const HUB_HOSTS = ['onlineweb.zhihuishu.com'];
     const courseUrl = ({ course, cls }) =>
         `https://${LEARN_HOST}/singleCourse/knowledgeStudy/${course}/${cls}`;
@@ -1556,7 +1556,7 @@
         const stem = textOf(captured.content);
         if (!title || (stem && norm(title.textContent) !== stem)) return null;
         if ((!stem || /<img\b/i.test(captured.content)) && keyOf(title) !== optionKey(captured.content)) return null;
-        const inputs = findVisible('input:not([type=hidden]):not([type=radio]):not([type=checkbox]), textarea, [contenteditable="true"]', root)
+        const inputs = findVisible('input:not([type=hidden]):not([type=radio]):not([type=checkbox]):not([type=file]):not([type=button]):not([type=submit]):not([type=reset]):not([type=image]), textarea, [contenteditable="true"]', root)
             .filter(el => !el.disabled && !el.readOnly);
         if (inputs.length && (/填空|简答|问答/.test(captured.questionTypeName ?? '') || !captured.optionVos?.length))
             return { id: String(captured.id), root, captured, signature: questionSignature(captured), inputs, stem };
@@ -1781,29 +1781,7 @@
         }
         if (!values) throw Error('填空答案无法对应到全部空位');
         const before = saveRequestSequence;
-        const layout = inputs => JSON.stringify(inputs?.map(el => [el.tagName, el.getAttribute('type') ?? 'text', el.isContentEditable]));
-        const expectedLayout = layout(q.inputs);
-        for (let i = 0; i < values.length; i++) {
-            const current = currentQuestion();
-            if (operationCancelled() || current?.signature !== q.signature || layout(current?.inputs) !== expectedLayout)
-                throw Error('填空题已变化或操作已取消');
-            const el = current.inputs[i];
-            el.focus();
-            if (el.isContentEditable) el.textContent = values[i];
-            else {
-                const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-                Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, values[i]);
-            }
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Unidentified', bubbles: true }));
-            el.blur();
-        }
-        await pause(80);
-        const actual = currentQuestion();
-        if (operationCancelled() || actual?.signature !== q.signature || layout(actual?.inputs) !== expectedLayout
-            || !actual.inputs.every((el, i) => (el.isContentEditable ? el.textContent : el.value) === values[i]))
-            throw Error('未能确认填空值完整写入');
+        await settleBlanks(q, values);
         await confirmAnswerSaved(q, before, values);
         setMessage(verified ? '已复用并保存平台确认的填空答案' : '填空已保存');
         await rememberAnswer(q, values, resumed ? 'resumed' : verified ? 'confirmed' : visual ? 'vision' : 'ai', context);
@@ -1818,6 +1796,62 @@
         return !task?.active || task.id !== activeBatchId || task.actor !== DOCUMENT_ID
             || page.kind !== 'exam' || !sameCourse(task, page) || page.point !== task.queue?.[task.index]?.point
             || task.examKey !== page.key;
+    }
+
+    async function settleBlanks(q, values) {
+        const layout = inputs => JSON.stringify(inputs?.map(el => [el.tagName, el.getAttribute('type') ?? 'text', el.isContentEditable]));
+        const expectedLayout = layout(q.inputs);
+        const current = () => {
+            const fresh = currentQuestion();
+            if (operationCancelled() || fresh?.signature !== q.signature || layout(fresh?.inputs) !== expectedLayout)
+                throw Error('填空题已变化或操作已取消');
+            return fresh;
+        };
+        const valueOf = el => el.isContentEditable ? el.textContent : el.value;
+        const deadline = Date.now() + 10000;
+        let actions = 0, stableSince = 0;
+        while (Date.now() < deadline) {
+            const fresh = current();
+            const indices = fresh.inputs.flatMap((el, i) => valueOf(el) !== values[i] ? [i] : []);
+            if (!indices.length) {
+                stableSince ||= Date.now();
+                if (Date.now() - stableSince >= 350) {
+                    log('info', 'answer.blank-verified', { question: q.id, count: values.length, actions });
+                    return;
+                }
+                await pause(80); continue;
+            }
+            stableSince = 0;
+            if (actions >= values.length * 3) break;
+            for (const i of indices) {
+                if (actions >= values.length * 3) break;
+                const el = current().inputs[i];
+                if (valueOf(el) === values[i]) continue;
+                actions++;
+                el.focus();
+                if (el.isContentEditable) el.textContent = values[i];
+                else {
+                    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, values[i]);
+                }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                // Element UI first updates item.content through v-model. Its
+                // native keyup then joins preData and emits chooseAnswer.
+                // Let Vue flush, and reacquire the input if a duplicate response
+                // ran userAshow or replaced the current blank component.
+                await pause(0);
+                const target = current().inputs[i];
+                if (valueOf(target) === values[i])
+                    target.dispatchEvent(new KeyboardEvent('keyup', { key: 'Unidentified', bubbles: true }));
+                el.blur();
+            }
+            await pause(80);
+        }
+        const fresh = current();
+        log('warn', 'answer.blank-mismatch', { question: q.id, actions, count: values.length,
+            mismatches: fresh.inputs.flatMap((el, i) => valueOf(el) !== values[i] ? [i + 1] : []), reason: 'values-not-stable' });
+        throw Error('填空值在页面更新后仍不稳定，已保留原卷并暂停');
     }
 
     async function settleSelection(q, indices) {
